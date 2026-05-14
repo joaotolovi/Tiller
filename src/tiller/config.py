@@ -1,0 +1,100 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+import json
+
+import yaml
+
+from .models import (
+    AgentRuntimeConfig,
+    GitHubConfig,
+    ProjectSpec,
+    SessionConfig,
+    TillerConfig,
+    TrackerConfig,
+)
+
+
+def expand_path(value: str | Path) -> Path:
+    return Path(value).expanduser().resolve()
+
+
+def _optional_path(value: str | Path | None) -> Path | None:
+    if value is None:
+        return None
+    return expand_path(value)
+
+
+def _load_yaml(text: str) -> dict[str, Any]:
+    return yaml.safe_load(text) or {}
+
+
+def _to_plain(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if hasattr(value, "__dataclass_fields__"):
+        return {name: _to_plain(getattr(value, name)) for name in value.__dataclass_fields__}
+    if isinstance(value, dict):
+        return {k: _to_plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_plain(item) for item in value]
+    return value
+
+
+def dump_json(path: Path, payload: Any) -> None:
+    path.write_text(json.dumps(_to_plain(payload), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def load_config(path: str | Path) -> TillerConfig:
+    raw = _load_yaml(Path(path).read_text(encoding="utf-8"))
+
+    tracker_raw = raw.get("tracker", {})
+    agent_raw = raw.get("agent", {})
+    session_raw = raw.get("session", {})
+    projects_raw = raw.get("projects", {})
+    github_raw = raw.get("github", {})
+
+    projects = {
+        name: ProjectSpec(
+            name=name,
+            url=data["url"],
+            default_branch=data.get("default_branch", "main"),
+        )
+        for name, data in projects_raw.items()
+    }
+
+    agent = AgentRuntimeConfig(
+        default=agent_raw.get("default", "claude-code"),
+        model=agent_raw.get("model"),
+        adapters_path=_optional_path(agent_raw.get("adapters_path")),
+        options=dict(agent_raw.get("options", {})),
+    )
+
+    return TillerConfig(
+        tracker=TrackerConfig(
+            type=tracker_raw["type"],
+            trigger_status=tracker_raw["trigger_status"],
+            poll_interval=int(tracker_raw.get("poll_interval", 30)),
+            processing_status=tracker_raw.get("processing_status"),
+            done_status=tracker_raw.get("done_status"),
+            options={
+                k: v
+                for k, v in tracker_raw.items()
+                if k not in {"type", "trigger_status", "poll_interval", "processing_status", "done_status"}
+            },
+        ),
+        agent=agent,
+        projects=projects,
+        session=SessionConfig(
+            base_path=expand_path(session_raw.get("base_path", "~/.tiller/sessions")),
+            cleanup_after_hours=session_raw.get("cleanup_after_hours", 24),
+            keep_finished_sessions=bool(session_raw.get("keep_finished_sessions", False)),
+        ),
+        github=GitHubConfig(
+            enabled=bool(github_raw.get("enabled", False)),
+            url=github_raw.get("url", "https://api.github.com"),
+            token=github_raw.get("token"),
+            token_env=github_raw.get("token_env", "GITHUB_API_TOKEN"),
+        ),
+    )

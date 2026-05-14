@@ -1,0 +1,283 @@
+from __future__ import annotations
+
+import hashlib
+import shutil
+from dataclasses import asdict
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+import uuid
+
+from .agents.common import write_native_mcp_project_files
+from .config import dump_json
+from .mcp import write_mcp_config
+from .models import ProjectSpec, SessionPaths, SessionRecord, Task, TillerConfig
+from .templates import render_agents_md, render_task_md
+from .trackers import TrackerAdapter
+from .repo_seed import RepoSeedManager
+from .workspace import EventRecord, ExternalRef, LocalAttachment, MessageRecord, SessionState, TrackerMetaRecord, WorkItemRecord, WorkspaceRepository
+
+
+class SessionManager:
+    def __init__(self, config: TillerConfig, tracker: TrackerAdapter) -> None:
+        self.config = config
+        self.tracker = tracker
+        self.config.session.base_path.mkdir(parents=True, exist_ok=True)
+        self.repo_seed_manager = RepoSeedManager(self.config.session.base_path, self.config.github.resolve_token())
+        self.workspace_repo = WorkspaceRepository(self.config.session.base_path)
+
+    def make_internal_task_id(self, task: Task) -> str:
+        digest = hashlib.sha1(task.id.encode("utf-8")).hexdigest()[:8]
+        return f"TASK-{digest.upper()}"
+
+    def build_paths(self, internal_task_id: str) -> SessionPaths:
+        root = self.config.session.base_path / internal_task_id
+        return SessionPaths(
+            root=root,
+            agents_md=root / "AGENTS.md",
+            task_md=root / "TASK.md",
+            state_md=root / "STATE.md",
+            projects_json=root / "projects.json",
+            repos_dir=root / "repos",
+            attachments_dir=root / "attachments",
+            mcp_dir=root / ".mcp",
+            mcp_config=root / ".mcp" / "config.json",
+            state_json=root / "session.json",
+        )
+
+    async def prepare(self, task: Task, agent_name: str, tool_transport: str = "cli") -> tuple[SessionRecord, SessionPaths, dict[str, Any]]:
+        internal_task_id = self.make_internal_task_id(task)
+        paths = self.build_paths(internal_task_id)
+        existing_record = self._load_existing_record(paths)
+
+        paths.root.mkdir(parents=True, exist_ok=True)
+        paths.repos_dir.mkdir(parents=True, exist_ok=True)
+        paths.attachments_dir.mkdir(parents=True, exist_ok=True)
+        paths.mcp_dir.mkdir(parents=True, exist_ok=True)
+
+        attachments = await self.tracker.download_attachments(task.id, paths.attachments_dir)
+        mcp_payload = write_mcp_config(paths.mcp_config, self.config)
+        write_native_mcp_project_files(paths.root, mcp_payload)
+        projects_payload = self._projects_payload()
+        dump_json(paths.projects_json, projects_payload)
+
+        task_payload = self._task_payload(task, attachments)
+        paths.agents_md.write_text(render_agents_md(tool_transport=tool_transport), encoding="utf-8")
+        paths.task_md.write_text(render_task_md(task_payload), encoding="utf-8")
+        self._ensure_state_md(paths, task, existing_record is not None)
+
+        if existing_record is not None:
+            record = existing_record
+            record.agent_name = agent_name
+            record.workspace = paths.root
+            record.config_path = Path("tiller.yaml").resolve()
+            record.status = "resumed"
+            record.resume_count += 1
+            record.last_checkpoint = "session_prepared"
+            record.updated_at = datetime.now(UTC).isoformat()
+            if record.started_at is None:
+                record.started_at = datetime.now(UTC).isoformat()
+        else:
+            record = SessionRecord(
+                internal_task_id=internal_task_id,
+                tracker_task_id=task.id,
+                agent_name=agent_name,
+                workspace=paths.root,
+                config_path=Path("tiller.yaml").resolve(),
+                started_at=datetime.now(UTC).isoformat(),
+                updated_at=datetime.now(UTC).isoformat(),
+                status="prepared",
+                resume_count=0,
+                last_checkpoint="session_prepared",
+            )
+
+        dump_json(paths.state_json, record)
+        self._write_workspace_records(paths, record, task, attachments)
+        return record, paths, mcp_payload
+
+    def cleanup(self, paths: SessionPaths) -> None:
+        if self.config.session.keep_finished_sessions:
+            return
+        for repo_name in self._load_provisioned_repo_names(paths):
+            self.repo_seed_manager.cleanup(paths.repos_dir / repo_name)
+        shutil.rmtree(paths.root, ignore_errors=True)
+
+    def _projects_payload(self) -> dict[str, Any]:
+        return {
+            name: {
+                **asdict(spec),
+                "repo_path": f"repos/{spec.name}",
+                "provision_method": "seed_copy",
+            }
+            for name, spec in self.config.projects.items()
+        }
+
+    def _task_payload(self, task: Task, attachments: list[Path]) -> dict[str, Any]:
+        return {
+            "id": task.id,
+            "title": task.title,
+            "description": task.description,
+            "status": task.status,
+            "comments": [asdict(comment) for comment in task.comments],
+            "attachments": [
+                {
+                    "id": attachment.id,
+                    "name": attachment.name,
+                    "url": attachment.url,
+                }
+                for attachment in task.attachments
+            ],
+            "downloaded_attachments": [str(path) for path in attachments],
+            "metadata": task.metadata,
+        }
+
+    def _load_provisioned_repo_names(self, paths: SessionPaths) -> list[str]:
+        if not paths.state_json.exists():
+            return []
+        payload = __import__("json").loads(paths.state_json.read_text(encoding="utf-8"))
+        return list(payload.get("provisioned_repos", []))
+
+    def _load_existing_record(self, paths: SessionPaths) -> SessionRecord | None:
+        if not paths.state_json.exists():
+            return None
+        payload = __import__("json").loads(paths.state_json.read_text(encoding="utf-8"))
+        return SessionRecord(
+            internal_task_id=payload["internal_task_id"],
+            tracker_task_id=payload.get("tracker_task_id") or payload["external_task_id"],
+            agent_name=payload["agent_name"],
+            workspace=Path(payload["workspace"]),
+            config_path=Path(payload["config_path"]) if payload.get("config_path") else None,
+            process_id=payload.get("process_id"),
+            started_at=payload.get("started_at"),
+            updated_at=payload.get("updated_at"),
+            completed_at=payload.get("completed_at"),
+            status=payload.get("status", "created"),
+            resume_count=int(payload.get("resume_count", 0)),
+            last_checkpoint=payload.get("last_checkpoint"),
+            provisioned_repos=list(payload.get("provisioned_repos", [])),
+        )
+
+    def _ensure_state_md(self, paths: SessionPaths, task: Task, resumed: bool) -> None:
+        if paths.state_md.exists():
+            return
+        paths.state_md.write_text(
+            self._initial_state_md(task, resumed=resumed),
+            encoding="utf-8",
+        )
+
+    def _initial_state_md(self, task: Task, *, resumed: bool) -> str:
+        return f"""# STATE
+
+## Session
+- task_id: {task.id}
+- title: {task.title}
+- mode: {'resume' if resumed else 'prepare'}
+
+## Current understanding
+- To be filled by the agent.
+
+## Decisions made
+- None yet.
+
+## Repositories in use
+- None yet.
+
+## Completed work
+- Nothing recorded yet.
+
+## Relevant blockers
+- None.
+
+## Next step
+- Read `TASK.md`, `STATE.md`, and refresh the current task state before proceeding.
+"""
+
+    def _write_workspace_records(self, paths: SessionPaths, record: SessionRecord, task: Task, attachments: list[Path]) -> None:
+        now = datetime.now(UTC).isoformat()
+        session_state = SessionState(
+            internal_task_id=record.internal_task_id,
+            external_task_id=record.tracker_task_id,
+            tracker_type=self.config.tracker.type,
+            workspace=paths.root,
+            status=record.status,
+            agent_name=record.agent_name,
+            config_path=record.config_path,
+            process_id=record.process_id,
+            started_at=record.started_at,
+            updated_at=record.updated_at or now,
+            completed_at=record.completed_at,
+            resume_count=record.resume_count,
+            last_checkpoint=record.last_checkpoint or "session_prepared",
+            provisioned_repos=list(record.provisioned_repos),
+        )
+        self.workspace_repo.save_session(session_state)
+        work_item = WorkItemRecord(
+            internal_task_id=record.internal_task_id,
+            external=ExternalRef(tracker_type=self.config.tracker.type, task_id=task.id),
+            title=task.title,
+            description=task.description,
+            source_status=task.status,
+            internal_status=record.status,
+            comments_count=len(task.comments),
+            attachments=[
+                LocalAttachment(
+                    id=attachment.id,
+                    name=attachment.name,
+                    source_url=attachment.url,
+                    local_path=self._attachment_local_path(paths, attachment.name, attachments),
+                )
+                for attachment in task.attachments
+            ],
+            metadata={"tracker_payload": task.metadata},
+            created_at=record.started_at,
+            updated_at=now,
+        )
+        self.workspace_repo.save_task(paths.root, work_item)
+        self.workspace_repo.save_tracker_meta(
+            paths.root,
+            TrackerMetaRecord(
+                tracker_type=self.config.tracker.type,
+                external_task_id=task.id,
+                source_status=task.status,
+                last_sync_at=now,
+                capabilities={"comments": True, "status_update": True, "attachments": True},
+            ),
+        )
+        for comment in task.comments:
+            self.workspace_repo.append_message(
+                paths.root,
+                MessageRecord(
+                    id=comment.id or f"msg-{uuid.uuid4().hex}",
+                    direction="inbound",
+                    channel="tracker",
+                    message_type="comment",
+                    author=comment.author,
+                    body=comment.body,
+                    created_at=comment.created_at or now,
+                    external_message_id=comment.id or None,
+                ),
+            )
+        self.workspace_repo.append_event(
+            paths.root,
+            EventRecord(
+                id=f"evt-{uuid.uuid4().hex}",
+                type="session_prepared",
+                created_at=now,
+                data={
+                    "external_task_id": task.id,
+                    "tracker_type": self.config.tracker.type,
+                    "workspace": str(paths.root),
+                    "resumed": record.status == "resumed",
+                    "attachments_downloaded": [str(path) for path in attachments],
+                },
+            ),
+        )
+
+    def _attachment_local_path(self, paths: SessionPaths, name: str, attachments: list[Path]) -> str | None:
+        for path in attachments:
+            if path.name == name:
+                return str(path.relative_to(paths.root))
+        return None
+
+    def provision_repo(self, paths: SessionPaths, project: ProjectSpec, branch_name: str | None = None) -> Path:
+        return self.repo_seed_manager.provision(paths=paths, project=project, branch_name=branch_name)

@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Local runtime configuration
+tiller.yaml
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test and coverage artifacts
+.coverage
+htmlcov/
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+

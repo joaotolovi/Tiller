@@ -1,0 +1,47 @@
+tracker:
+  type: clickup
+  token: YOUR_CLICKUP_TOKEN
+  team_id: "YOUR_CLICKUP_TEAM_ID"
+  trigger_status: AIDEV
+  poll_interval: 60
+  # assignee: "CLICKUP_USER_ID"
+  # tag: backend
+  # Telegram example:
+  # type: telegram
+  # bot_token: YOUR_TELEGRAM_BOT_TOKEN
+  # state_path: ~/.tiller/telegram-state.json
+  # allowed_chat_ids:
+  #   - "123456789"
+  # allowed_user_ids:
+  #   - "987654321"
+  # trigger_status: new
+
+agent:
+  default: codex
+  model: gpt-5
+  # The codex adapter runs with --yolo by default so the agent can operate
+  # headlessly without interactive approval prompts.
+  # options:
+  #   codex_extra_args: []
+
+github:
+  enabled: true
+  url: https://api.github.com
+  token_env: GITHUB_API_TOKEN
+  # token: github_pat_xxx
+
+projects:
+  backend:
+    url: https://github.com/your-org/backend
+    default_branch: main
+  frontend:
+    url: https://github.com/your-org/frontend
+    default_branch: main
+  app:
+    url: https://github.com/your-org/app
+    default_branch: main
+
+session:
+  base_path: ~/.tiller/sessions
+  cleanup_after_hours: 24
+  keep_finished_sessions: true

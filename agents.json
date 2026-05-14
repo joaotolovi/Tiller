@@ -1,0 +1,39 @@
+{
+  "adapters": [
+    {
+      "name": "claude-code",
+      "command": "claude",
+      "args": ["--print", "--permission-mode", "bypassPermissions", "--output-format", "text", "-p"],
+      "prompt_mode": "arg",
+      "mcp_env_var": "TILLER_MCP_CONFIG"
+    },
+    {
+      "name": "codex",
+      "command": "codex",
+      "args": ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check"],
+      "prompt_mode": "arg",
+      "mcp_env_var": "TILLER_MCP_CONFIG"
+    },
+    {
+      "name": "opencode",
+      "command": "opencode",
+      "args": ["run", "--format", "json"],
+      "prompt_mode": "arg",
+      "mcp_env_var": "TILLER_MCP_CONFIG"
+    },
+    {
+      "name": "aider",
+      "command": "aider",
+      "args": ["--message", "--yes", "--auto-commits", "--map-tokens", "2048", "--no-auto-lint"],
+      "prompt_mode": "arg",
+      "mcp_env_var": "TILLER_MCP_CONFIG"
+    },
+    {
+      "name": "gemini-cli",
+      "command": "gemini",
+      "args": ["-p", "--output-format", "json", "--yolo"],
+      "prompt_mode": "arg",
+      "mcp_env_var": "TILLER_MCP_CONFIG"
+    }
+  ]
+}
