@@ -18,7 +18,7 @@ tracker:
 
 agent:
   default: codex
-  model: gpt-5
+  # model: gpt-5.4
   # The codex adapter runs with --yolo by default so the agent can operate
   # headlessly without interactive approval prompts.
   # options:
@@ -35,7 +35,6 @@ memory:
   provider: hindsight
   base_path: ~/.tiller/memory
   # Optional default project name for project-scoped memories.
-  # project: backend
   # For embedded Hindsight support, install:
   #   uv sync --extra memory-hindsight
   # For LangMem support, install:
