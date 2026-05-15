@@ -11,7 +11,7 @@ class CodexAdapter(CLIAdapter):
     def spawn(self, request: AgentRunRequest) -> SpawnResult:
         runtime_dir = self._runtime_dir(request.workspace)
         output_path = runtime_dir / "codex-last-message.txt"
-        command = [self.command, "exec", "--full-auto"]
+        command = [self.command, "exec", "--sandbox", "danger-full-access"]
         if request.model:
             command.extend(["-m", request.model])
         command.extend(

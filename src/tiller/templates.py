@@ -26,9 +26,21 @@ def render_agents_md(tool_transport: str = "cli") -> str:
 - If a session operation is available through MCP, do not use the local `tiller session ...` CLI for that operation.
 - In MCP mode, use local `tiller ...` CLI commands only when MCP fails for the operation you need.
 """
+        memory_section = """### Memory tools
+- Use the MCP memory tools to retain useful context and recall relevant context when needed.
+- Use memory only for information with future value; do not save every transient step.
+- When retaining memory, choose the scope intentionally:
+  - `project:<project_name>` for repo-specific knowledge
+  - `user` for stable user preferences
+  - `domain` for business rules and domain logic
+  - `history` for globally useful historical context
+- Use recall before or during work when prior project knowledge, user preferences, domain rules, or historical context may help.
+- If a memory operation is available through MCP, do not use the local `tiller memory ...` CLI for that operation.
+"""
         session_resources = """- Projects: see `projects.json`. Request repos on demand through the MCP project tools.
 - GitHub: prefer the MCP GitHub tools for auth checks, repository checks, and PR creation.
 - Tracker: prefer the MCP tracker tools for progress and status.
+- Memory: prefer the MCP memory tools for retaining useful context and recalling relevant context.
 - Session memory: use `STATE.md` as the continuity source between runs.
 """
     else:
@@ -54,9 +66,20 @@ def render_agents_md(tool_transport: str = "cli") -> str:
 - Use `tiller session status` to inspect the current session state.
 - Use `tiller session paths` to inspect the important files and directories in the session.
 """
+        memory_section = """### Memory commands
+- Use `tiller memory retain "..." --scope <scope>` to store useful context with future value.
+- Use `tiller memory recall "..."` or `tiller memory recall "..." --scope <scope>` to recover relevant context when needed.
+- Use memory only for information with future value; do not save every transient step.
+- Choose scopes intentionally on retain:
+  - `project:<project_name>` for repo-specific knowledge
+  - `user` for stable user preferences
+  - `domain` for business rules and domain logic
+  - `history` for globally useful historical context
+"""
         session_resources = """- Projects: see `projects.json`. Request repos on demand through `tiller project use`.
 - GitHub: use local `tiller github ...` commands for auth checks, repository checks, and PR creation.
 - Tracker: use local `tiller tracker ...` commands for progress and status.
+- Memory: use local `tiller memory ...` commands to retain useful context and recall relevant context.
 - Session memory: use `STATE.md` as the continuity source between runs.
 """
 
@@ -101,6 +124,7 @@ You are an autonomous developer. You receive a task and solve it in the best pos
 {project_section}
 {github_section}
 {session_section}
+{memory_section}
 
 ## Resources
 {session_resources}

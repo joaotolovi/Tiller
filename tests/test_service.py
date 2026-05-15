@@ -22,7 +22,9 @@ from tiller.models import AgentRunRequest, DiscoveredAgent, GitHubConfig, Projec
 from tiller.runtime import serialize_task
 from tiller.service import TillerService
 from tiller.trackers import InMemoryTrackerAdapter, ClickUpTrackerAdapter, TelegramTrackerAdapter
+from tiller.trackers.telegram import TelegramTrackerState, TelegramStateStore
 from tiller.trackers.factory import build_tracker_adapter
+from tiller.trackers.sync_factory import build_sync_tracker
 from tiller.trackers.sync_clickup import SyncClickUpTrackerAdapter
 from tiller.trackers.sync_base import SyncTrackerAdapter
 from tiller.setup_clickup import ClickUpSetupProvider
@@ -409,7 +411,7 @@ session:
     record2, paths2, _ = asyncio.run(manager.prepare(tracker._tasks["1"], "stub"))
 
     assert record1.internal_task_id == record2.internal_task_id
-    assert record2.status == "resumed"
+    assert record2.state == "stopped"
     assert paths1.root == paths2.root
     assert paths2.state_md.read_text(encoding="utf-8") == "# STATE\n\ncustom state\n"
     assert "Updated body" in paths2.task_md.read_text(encoding="utf-8")
@@ -450,7 +452,7 @@ def test_build_tracker_server_includes_cli_parity_tools(tmp_path: Path) -> None:
                 "agent_name": "stub",
                 "workspace": str(session_root),
                 "config_path": str(tmp_path / "tiller.yaml"),
-                "status": "running",
+                "state": "running",
                 "provisioned_repos": [],
             }
         ),
@@ -707,18 +709,144 @@ def test_telegram_tracker_creates_task_comments_and_rotates_on_new(tmp_path: Pat
     assert adapter._client.sent_messages[-1] == {"chat_id": "100", "text": "andamento"}
 
 
-def test_telegram_tracker_factory_accepts_required_options(tmp_path: Path) -> None:
-    adapter = build_tracker_adapter(
-        "telegram",
-        bot_token="token",
-        state_path=str(tmp_path / "telegram-state.json"),
-        allowed_chat_ids=["100", 200],
-        allowed_user_ids=["7", 8],
+def test_telegram_tracker_merges_fragmented_long_messages_into_single_comment(tmp_path: Path) -> None:
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, updates: list[dict[str, object]]) -> None:
+            self.updates = updates
+            self.sent_messages: list[dict[str, object]] = []
+            self.base_url = "https://api.telegram.org/bottoken"
+
+        async def get(self, path: str, params=None):
+            if path == "/getUpdates":
+                result = self.updates
+                self.updates = []
+                return FakeResponse({"ok": True, "result": result})
+            if path == "/getMe":
+                return FakeResponse({"ok": True, "result": {"id": 1}})
+            raise AssertionError(f"unexpected path: {path}")
+
+        async def post(self, path: str, json=None):
+            raise AssertionError(f"unexpected path: {path}")
+
+        async def aclose(self) -> None:
+            return None
+
+    state_path = tmp_path / "telegram-state.json"
+    adapter = TelegramTrackerAdapter(bot_token="token", state_path=state_path, allowed_chat_ids=["100"], allowed_user_ids=["7"])
+    adapter._client = FakeAsyncClient(
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 70,
+                    "date": 1715781636,
+                    "text": "Parte 1 de uma mensagem longa",
+                    "chat": {"id": 100},
+                    "from": {"id": 7, "first_name": "Jhon"},
+                },
+            },
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 71,
+                    "date": 1715781636,
+                    "text": "Parte 2 da mesma mensagem longa",
+                    "chat": {"id": 100},
+                    "from": {"id": 7, "first_name": "Jhon"},
+                },
+            },
+            {
+                "update_id": 3,
+                "message": {
+                    "message_id": 72,
+                    "date": 1715781636,
+                    "text": "Parte 3 da mesma mensagem longa",
+                    "chat": {"id": 100},
+                    "from": {"id": 7, "first_name": "Jhon"},
+                },
+            },
+        ]
+    )  # type: ignore[assignment]
+
+    tasks = asyncio.run(adapter.list_tasks("new"))
+    assert [task.id for task in tasks] == ["telegram-1"]
+    assert len(tasks[0].comments) == 1
+    assert tasks[0].comments[0].body == "Parte 1 de uma mensagem longa\nParte 2 da mesma mensagem longa\nParte 3 da mesma mensagem longa"
+
+
+def test_sync_telegram_tracker_add_comment_persists_comment(tmp_path: Path, monkeypatch) -> None:
+    state_path = tmp_path / "telegram-state.json"
+    TelegramStateStore(state_path).save(
+        TelegramTrackerState.from_payload(
+            {
+                "next_task_number": 2,
+                "last_update_id": 0,
+                "awaiting_new_task_by_chat": {},
+                "active_task_by_chat": {"100": "telegram-1"},
+                "tasks": {
+                    "telegram-1": {
+                        "id": "telegram-1",
+                        "chat_id": "100",
+                        "title": "primeira task",
+                        "description": "primeira task",
+                        "status": "new",
+                        "comments": [],
+                        "attachments": [],
+                        "metadata": {"chat_id": "100", "created_at": "2026-05-15T00:00:00+00:00"},
+                        "created_at": "2026-05-15T00:00:00+00:00",
+                    }
+                },
+            }
+        )
     )
 
-    assert isinstance(adapter, TelegramTrackerAdapter)
-    assert adapter.allowed_chat_ids == {"100", "200"}
-    assert adapter.allowed_user_ids == {"7", "8"}
+    class StubSyncResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "ok": True,
+                "result": {
+                    "message_id": 99,
+                    "date": 1715640009,
+                    "text": "andamento",
+                    "from": {"username": "tiller"},
+                },
+            }
+
+    class StubSyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            self.sent_messages: list[dict[str, str]] = []
+            self.base_url = "https://api.telegram.org/bottoken"
+
+        def post(self, path: str, json: dict[str, str]) -> StubSyncResponse:
+            assert path == "/sendMessage"
+            self.sent_messages.append(json)
+            return StubSyncResponse()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("tiller.trackers.telegram.httpx.Client", StubSyncClient)
+
+    adapter = build_sync_tracker("telegram", bot_token="token", state_path=str(state_path))
+    adapter.add_comment("telegram-1", "andamento")
+
+    task = adapter.get_task("telegram-1")
+    assert task.comments[-1].body == "andamento"
+
+
 
 def test_clickup_factory_accepts_optional_filters() -> None:
     adapter = build_tracker_adapter(
@@ -1328,7 +1456,7 @@ def test_handle_tracker_command_closes_tracker(tmp_path: Path, monkeypatch, caps
                 "agent_name": "stub",
                 "workspace": str(session_root),
                 "config_path": str(tmp_path / "tiller.yaml"),
-                "status": "running",
+                "state": "running",
                 "provisioned_repos": [],
             }
         ),
@@ -1382,7 +1510,7 @@ def test_handle_tracker_status_options_returns_live_statuses(tmp_path: Path, mon
                 "agent_name": "stub",
                 "workspace": str(session_root),
                 "config_path": str(tmp_path / "tiller-status-options.yaml"),
-                "status": "running",
+                "state": "running",
                 "provisioned_repos": [],
             }
         ),
@@ -1438,7 +1566,7 @@ def test_handle_github_auth_status_uses_yaml_token(tmp_path: Path, monkeypatch, 
                 "agent_name": "stub",
                 "workspace": str(session_root),
                 "config_path": str(tmp_path / "tiller.yaml"),
-                "status": "running",
+                "state": "running",
                 "provisioned_repos": [],
             }
         ),
@@ -1483,6 +1611,507 @@ session:
     assert output["login"] == "octocat"
 
 
+def test_memory_provider_retain_recall(tmp_path: Path) -> None:
+    from tiller.memory.provider import LocalMemoryProvider
+
+    provider = LocalMemoryProvider(tmp_path / "memory")
+    provider.retain(bank_id="session:TASK-123", content="Project uses poetry", context="tooling")
+    provider.retain(bank_id="session:TASK-123", content="Run pytest with -q", context="tests")
+
+    recall = provider.recall(bank_id="session:TASK-123", query="how do tests run", limit=5)
+    assert recall.bank_id == "session:TASK-123"
+    assert len(recall.entries) == 1
+    assert recall.entries[0].content == "Run pytest with -q"
+
+
+def test_session_operations_memory_roundtrip(tmp_path: Path) -> None:
+    from tiller.operations import SessionOperations
+
+    session_root = tmp_path / "session-memory"
+    session_root.mkdir(parents=True, exist_ok=True)
+    (session_root / "session.json").write_text(
+        json.dumps(
+            {
+                "internal_task_id": "TASK-123",
+                "tracker_task_id": "1",
+                "agent_name": "stub",
+                "workspace": str(session_root),
+                "config_path": str(tmp_path / "tiller-memory.yaml"),
+                "state": "running",
+                "provisioned_repos": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_root / "projects.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "tiller-memory.yaml").write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+agent:
+  default: stub
+memory:
+  enabled: true
+  provider: local
+  base_path: %s
+projects: {}
+session:
+  base_path: %s
+""" % ((tmp_path / "memory-store").as_posix(), tmp_path.as_posix()),
+        encoding="utf-8",
+    )
+
+    operations = SessionOperations(session_root)
+    retained = operations.memory_retain("history", "Project uses poetry", "tooling")
+    recalled = operations.memory_recall("poetry", scope="history")
+
+    assert retained["scope"] == "history"
+    assert retained["bank_id"] == "history"
+    assert retained["metadata"]["task_id"] == "1"
+    assert retained["metadata"]["scope"] == "history"
+    assert len(recalled["entries"]) == 1
+    assert recalled["entries"][0]["content"] == "Project uses poetry"
+
+
+def test_handle_memory_command_outputs_payload(tmp_path: Path, capsys) -> None:
+    from tiller.commands import handle_session_command
+
+    session_root = tmp_path / "session-memory-cli"
+    session_root.mkdir(parents=True, exist_ok=True)
+    (session_root / "session.json").write_text(
+        json.dumps(
+            {
+                "internal_task_id": "TASK-321",
+                "tracker_task_id": "9",
+                "agent_name": "stub",
+                "workspace": str(session_root),
+                "config_path": str(tmp_path / "tiller-memory-cli.yaml"),
+                "state": "running",
+                "provisioned_repos": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_root / "projects.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "tiller-memory-cli.yaml").write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+agent:
+  default: stub
+memory:
+  enabled: true
+  provider: local
+  base_path: %s
+projects: {}
+session:
+  base_path: %s
+""" % ((tmp_path / "memory-cli-store").as_posix(), tmp_path.as_posix()),
+        encoding="utf-8",
+    )
+
+    exit_code = handle_session_command(
+        __import__("argparse").Namespace(
+            command="memory",
+            memory_command="retain",
+            scope="project:backend",
+            content="The repo uses pytest",
+            context="tests",
+            query=None,
+            limit=5,
+            session=str(session_root),
+        )
+    )
+    rendered = json.loads(capsys.readouterr().out)
+
+    assert rendered["scope"] == "project:backend"
+    assert rendered["content"] == "The repo uses pytest"
+    assert rendered["context"] == "tests"
+    assert rendered["bank_id"] == "project:backend"
+
+
+def test_build_tracker_server_exposes_memory_tools(tmp_path: Path) -> None:
+    session_root = tmp_path / "session-mcp-memory"
+    session_root.mkdir(parents=True, exist_ok=True)
+    (session_root / "session.json").write_text(
+        json.dumps(
+            {
+                "internal_task_id": "TASK-555",
+                "tracker_task_id": "42",
+                "agent_name": "stub",
+                "workspace": str(session_root),
+                "config_path": str(tmp_path / "tiller-mcp-memory.yaml"),
+                "state": "running",
+                "provisioned_repos": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_root / "projects.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "tiller-mcp-memory.yaml").write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+agent:
+  default: stub
+memory:
+  enabled: true
+  provider: local
+  base_path: %s
+projects: {}
+session:
+  base_path: %s
+""" % ((tmp_path / "memory-mcp-store").as_posix(), tmp_path.as_posix()),
+        encoding="utf-8",
+    )
+
+    async def run_test() -> None:
+        server = build_tracker_server(session_root)
+        await server._tool_manager.get_tool("memory_retain").fn(content="Use pytest -q", scope="history", context="tests")
+        response = await server._tool_manager.get_tool("memory_recall").fn(query="pytest", limit=5, scope="history")
+        payload = json.loads(response)
+        tool_names = sorted(server._tool_manager._tools.keys())
+
+        assert payload["scope"] == "history"
+        assert payload["bank_id"] == "history"
+        assert payload["entries"][0]["content"] == "Use pytest -q"
+        assert "memory_retain" in tool_names
+        assert "memory_recall" in tool_names
+        assert "memory_reflect" not in tool_names
+
+    asyncio.run(run_test())
+
+
+
+def test_langmem_memory_provider_uses_manager_and_local_recall(monkeypatch, tmp_path: Path) -> None:
+    import sys
+    import types
+
+    from tiller.memory.provider import LangMemMemoryProvider
+
+    invoked_payloads: list[dict[str, object]] = []
+
+    class FakeManager:
+        def invoke(self, payload):
+            invoked_payloads.append(payload)
+            return [{"content": "Project uses poetry"}, {"content": "Tests run with pytest -q"}]
+
+    def fake_create_memory_manager(model_name: str):
+        assert model_name == "openai:gpt-5-mini"
+        return FakeManager()
+
+    monkeypatch.setitem(sys.modules, "langmem", types.SimpleNamespace(create_memory_manager=fake_create_memory_manager))
+
+    provider = LangMemMemoryProvider(
+        llm_provider="openai",
+        llm_model="gpt-5-mini",
+        llm_api_key="secret",
+        llm_api_key_env="OPENAI_API_KEY",
+        base_path=tmp_path / "langmem-db",
+    )
+    retained = provider.retain(bank_id="session:TASK-2", content="The project uses poetry and pytest", context="tooling")
+    recalled = provider.recall(bank_id="session:TASK-2", query="pytest")
+
+    assert retained.content == "Project uses poetry"
+    assert invoked_payloads == [
+        {
+            "messages": [
+                {"role": "system", "content": "tooling"},
+                {"role": "user", "content": "The project uses poetry and pytest"},
+            ]
+        }
+    ]
+    assert [entry.content for entry in recalled.entries] == ["Tests run with pytest -q"]
+def test_hindsight_memory_provider_uses_embedded_client(monkeypatch, tmp_path: Path) -> None:
+    import sys
+    import types
+
+    from tiller.memory.provider import HindsightMemoryProvider
+
+    retained_payloads: list[dict[str, object]] = []
+
+    class FakeHindsightServer:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            self.url = "http://127.0.0.1:9999"
+            self.exited = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            self.exited = True
+
+    class FakeHindsightClient:
+        def __init__(self, base_url: str) -> None:
+            self.base_url = base_url
+
+        def retain(self, **payload):
+            retained_payloads.append(payload)
+            return {"ok": True}
+
+        def recall(self, **payload):
+            assert payload == {"bank_id": "history", "query": "pytest"}
+            return {
+                "results": [
+                    {
+                        "id": "mem-1",
+                        "content": "Run pytest -q",
+                        "context": "tests",
+                        "metadata": {"kind": "tip"},
+                    }
+                ]
+            }
+
+    monkeypatch.setitem(
+        sys.modules,
+        "hindsight",
+        types.SimpleNamespace(HindsightServer=FakeHindsightServer, HindsightClient=FakeHindsightClient),
+    )
+
+    provider = HindsightMemoryProvider(
+        llm_provider="openai",
+        llm_model="gpt-5-mini",
+        llm_api_key="secret",
+        base_path=tmp_path / "hindsight-db",
+    )
+    retained = provider.retain(bank_id="history", content="Run pytest -q", context="tests", metadata={"kind": "tip"})
+    recalled = provider.recall(bank_id="history", query="pytest")
+    provider.close()
+
+    assert retained.content == "Run pytest -q"
+    assert retained_payloads == [
+        {
+            "bank_id": "history",
+            "content": "Run pytest -q",
+            "context": "tests",
+            "metadata": {"kind": "tip"},
+        }
+    ]
+    assert recalled.entries[0].content == "Run pytest -q"
+    assert recalled.entries[0].metadata == {"kind": "tip"}
+
+
+
+def test_load_session_context_accepts_external_task_id_fallback(tmp_path: Path) -> None:
+    from tiller.runtime import load_session_context
+
+    session_root = tmp_path / "session-external-id"
+    session_root.mkdir(parents=True, exist_ok=True)
+    (session_root / "session.json").write_text(
+        json.dumps(
+            {
+                "internal_task_id": "TASK-EXT1",
+                "external_task_id": "telegram-123",
+                "agent_name": "stub",
+                "workspace": str(session_root),
+                "config_path": str(tmp_path / "tiller.yaml"),
+                "state": "running",
+                "provisioned_repos": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "tiller.yaml").write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+agent:
+  default: stub
+projects: {}
+session:
+  base_path: %s
+""" % (tmp_path.as_posix(),),
+        encoding="utf-8",
+    )
+
+    context = load_session_context(session_root)
+
+    assert context.record.tracker_task_id == "telegram-123"
+
+
+
+def test_build_tracker_server_accepts_external_task_id_fallback(tmp_path: Path) -> None:
+    session_root = tmp_path / "session-mcp-external-id"
+    session_root.mkdir(parents=True, exist_ok=True)
+    (session_root / "session.json").write_text(
+        json.dumps(
+            {
+                "internal_task_id": "TASK-EXT2",
+                "external_task_id": "telegram-456",
+                "agent_name": "stub",
+                "workspace": str(session_root),
+                "config_path": str(tmp_path / "tiller.yaml"),
+                "state": "running",
+                "provisioned_repos": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_root / "projects.json").write_text("{}", encoding="utf-8")
+
+    server = build_tracker_server(session_root)
+
+    assert server is not None
+
+
+
+def test_session_memory_service_builds_langmem_provider(monkeypatch, tmp_path: Path) -> None:
+    from tiller.config import load_config
+    from tiller.memory.service import SessionMemoryService
+    from tiller.runtime import load_session_context
+
+    session_root = tmp_path / "session-langmem"
+    session_root.mkdir(parents=True, exist_ok=True)
+    (session_root / "session.json").write_text(
+        json.dumps(
+            {
+                "internal_task_id": "TASK-901",
+                "tracker_task_id": "78",
+                "agent_name": "stub",
+                "workspace": str(session_root),
+                "config_path": str(tmp_path / "tiller-langmem.yaml"),
+                "state": "running",
+                "provisioned_repos": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_root / "projects.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "tiller-langmem.yaml").write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+agent:
+  default: stub
+memory:
+  enabled: true
+  provider: langmem
+  base_path: %s
+  llm_provider: openai
+  llm_model: gpt-5-mini
+  llm_api_key_env: LANGMEM_TEST_KEY
+projects: {}
+session:
+  base_path: %s
+""" % ((tmp_path / "langmem-store").as_posix(), tmp_path.as_posix()),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    class StubLangMemProvider:
+        def __init__(self, *, llm_provider: str, llm_model: str | None, llm_api_key: str, llm_api_key_env: str, base_path: Path) -> None:
+            captured["llm_provider"] = llm_provider
+            captured["llm_model"] = llm_model
+            captured["llm_api_key"] = llm_api_key
+            captured["llm_api_key_env"] = llm_api_key_env
+            captured["base_path"] = base_path
+
+        def retain(self, *, bank_id: str, content: str, context: str | None = None, metadata: dict[str, object] | None = None):
+            raise AssertionError("retain should not be called")
+
+        def recall(self, *, bank_id: str, query: str, limit: int = 5):
+            raise AssertionError("recall should not be called")
+
+    monkeypatch.setattr("tiller.memory.service.LangMemMemoryProvider", StubLangMemProvider)
+    monkeypatch.setenv("LANGMEM_TEST_KEY", "langmem-secret")
+
+    config = load_config(tmp_path / "tiller-langmem.yaml")
+    context = load_session_context(session_root)
+    service = SessionMemoryService.from_context(context, config)
+
+    assert service.enabled() is True
+    assert captured == {
+        "llm_provider": "openai",
+        "llm_model": "gpt-5-mini",
+        "llm_api_key": "langmem-secret",
+        "llm_api_key_env": "LANGMEM_TEST_KEY",
+        "base_path": (tmp_path / "langmem-store").resolve(),
+    }
+
+
+
+def test_session_memory_service_builds_hindsight_provider(monkeypatch, tmp_path: Path) -> None:
+    from tiller.config import load_config
+    from tiller.memory.service import SessionMemoryService
+    from tiller.runtime import load_session_context
+
+    session_root = tmp_path / "session-hindsight"
+    session_root.mkdir(parents=True, exist_ok=True)
+    (session_root / "session.json").write_text(
+        json.dumps(
+            {
+                "internal_task_id": "TASK-900",
+                "tracker_task_id": "77",
+                "agent_name": "stub",
+                "workspace": str(session_root),
+                "config_path": str(tmp_path / "tiller-hindsight.yaml"),
+                "state": "running",
+                "provisioned_repos": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_root / "projects.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "tiller-hindsight.yaml").write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+agent:
+  default: stub
+memory:
+  enabled: true
+  provider: hindsight
+  base_path: %s
+  llm_provider: openai
+  llm_model: gpt-5-mini
+  llm_api_key_env: HINDSIGHT_TEST_KEY
+projects: {}
+session:
+  base_path: %s
+""" % ((tmp_path / "hindsight-store").as_posix(), tmp_path.as_posix()),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    class StubHindsightProvider:
+        def __init__(self, *, llm_provider: str, llm_model: str | None, llm_api_key: str, base_path: Path | None = None) -> None:
+            captured["llm_provider"] = llm_provider
+            captured["llm_model"] = llm_model
+            captured["llm_api_key"] = llm_api_key
+            captured["base_path"] = base_path
+
+        def retain(self, *, bank_id: str, content: str, context: str | None = None, metadata: dict[str, object] | None = None):
+            raise AssertionError("not used")
+
+        def recall(self, *, bank_id: str, query: str, limit: int = 5):
+            raise AssertionError("not used")
+
+    monkeypatch.setenv("HINDSIGHT_TEST_KEY", "api-key")
+    monkeypatch.setattr("tiller.memory.service.HindsightMemoryProvider", StubHindsightProvider)
+
+    config = load_config(tmp_path / "tiller-hindsight.yaml")
+    context = load_session_context(session_root)
+    service = SessionMemoryService.from_context(context, config)
+
+    assert service.provider.__class__ is StubHindsightProvider
+    assert captured == {
+        "llm_provider": "openai",
+        "llm_model": "gpt-5-mini",
+        "llm_api_key": "api-key",
+        "base_path": (tmp_path / "hindsight-store").resolve(),
+    }
+
+
+
 def test_handle_project_use_uses_seed_copy_without_branch(tmp_path: Path, monkeypatch, capsys) -> None:
     from tiller.commands import handle_session_command
 
@@ -1496,7 +2125,7 @@ def test_handle_project_use_uses_seed_copy_without_branch(tmp_path: Path, monkey
                 "agent_name": "stub",
                 "workspace": str(session_root),
                 "config_path": str(tmp_path / "tiller.yaml"),
-                "status": "running",
+                "state": "running",
                 "provisioned_repos": [],
             }
         ),
@@ -1576,7 +2205,7 @@ def test_handle_github_create_pr_reads_repo_metadata(tmp_path: Path, monkeypatch
                 "agent_name": "stub",
                 "workspace": str(session_root),
                 "config_path": str(tmp_path / "tiller.yaml"),
-                "status": "running",
+                "state": "running",
                 "provisioned_repos": ["backend"],
             }
         ),

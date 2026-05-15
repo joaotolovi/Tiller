@@ -79,12 +79,25 @@ class GitHubConfig:
 
 
 @dataclass(slots=True)
+class MemoryConfig:
+    enabled: bool = False
+    provider: str = "local"
+    base_path: Path = Path("~/.tiller/memory")
+    project: str | None = None
+    llm_provider: str = "openai"
+    llm_model: str | None = None
+    llm_api_key: str | None = None
+    llm_api_key_env: str = "OPENAI_API_KEY"
+
+
+@dataclass(slots=True)
 class TillerConfig:
     tracker: TrackerConfig
     agent: AgentRuntimeConfig
     projects: dict[str, ProjectSpec]
     session: SessionConfig
     github: GitHubConfig = field(default_factory=GitHubConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 
 @dataclass(slots=True)
@@ -112,7 +125,7 @@ class SessionRecord:
     started_at: str | None = None
     updated_at: str | None = None
     completed_at: str | None = None
-    status: str = "created"
+    state: str = "stopped"
     resume_count: int = 0
     last_checkpoint: str | None = None
     provisioned_repos: list[str] = field(default_factory=list)

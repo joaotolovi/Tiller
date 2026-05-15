@@ -62,6 +62,7 @@ Agent CLI launcher | Starts the selected coding-agent CLI with the task goal in 
 Project-local MCP bootstrap | Prepares MCP config files for supported agent CLIs inside the session workspace.
 Local Tiller commands | Gives the agent a universal interface to read tasks, comment, request repos, inspect session state, and work with GitHub.
 GitHub integration | Uses local `tiller github ...` commands backed by the GitHub REST API for auth checks, repo checks, and PR creation.
+Session memory tools | Exposes simple `retain` and `recall` memory operations through the existing CLI and MCP layers.
 Repo provisioning | Lets the agent request configured repos and receive an isolated repo copy inside its session.
 Session memory | Keeps `STATE.md` and session metadata so paused work can resume with context.
 
@@ -195,7 +196,29 @@ session:
   keep_finished_sessions: true
 ```
 
-### 3. Check which agent CLIs are available
+### 3. Optional: enable Hindsight memory provider
+
+Default install stays light:
+
+```bash
+uv sync
+```
+
+If you want the embedded Hindsight provider:
+
+```bash
+uv sync --extra memory-hindsight
+```
+
+If you want the LangMem provider:
+
+```bash
+uv sync --extra memory-langmem
+```
+
+Then set `memory.provider: hindsight` or `memory.provider: langmem` in `tiller.yaml` and configure the LLM fields under `memory:`.
+
+### 4. Check which agent CLIs are available
 
 ```bash
 uv run tiller discover-agents --config tiller.yaml
@@ -224,7 +247,19 @@ Command | Purpose
 `uv run tiller project use backend --reason "..."` | Provisions a repo copy into the current session.
 `uv run tiller github auth-status` | Verifies GitHub API access for the current session.
 `uv run tiller github create-pr --repo backend --title "..." --body-file pr.md` | Opens a PR through the GitHub REST API.
+`uv run tiller memory retain "..." --scope history --context "..."` | Stores a useful memory with explicit scope.
+`uv run tiller memory recall "..."` | Searches retained memories across available scopes.
 `uv run tiller session status` | Shows the current session state.
+
+By default, memory uses the lightweight local provider. To use the embedded Hindsight provider, install the optional extra with `uv sync --extra memory-hindsight` and set `memory.provider: hindsight`. To use LangMem, install `uv sync --extra memory-langmem` and set `memory.provider: langmem`.
+
+Memory scopes are explicit on write:
+- `project:<project_name>` for repo-specific knowledge
+- `user` for global user preferences
+- `domain` for business/domain rules
+- `history` for globally useful historical context
+
+`memory recall` accepts an optional scope. Without one, Tiller searches across available scopes.
 
 ---
 

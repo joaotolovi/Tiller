@@ -16,6 +16,14 @@ dependencies = [
   "textual>=8.2.6",
 ]
 
+[project.optional-dependencies]
+memory-hindsight = [
+  "hindsight-all>=0.1.0",
+]
+memory-langmem = [
+  "langmem>=0.0.29",
+]
+
 [dependency-groups]
 dev = [
   "pytest>=8.0.0",

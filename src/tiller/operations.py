@@ -21,6 +21,7 @@ from .runtime import (
 )
 from .trackers.factory import build_tracker_adapter
 from .trackers.sync_factory import build_sync_tracker
+from .memory import SessionMemoryService
 from .workspace import EventRecord, MessageRecord, WorkspaceRepository
 
 
@@ -194,7 +195,7 @@ class SessionOperations:
             "internal_task_id": self.context.record.internal_task_id,
             "tracker_task_id": self.context.record.tracker_task_id,
             "agent_name": self.context.record.agent_name,
-            "status": self.context.record.status,
+            "state": self.context.record.state,
             "process_id": self.context.record.process_id,
             "workspace": str(self.context.record.workspace),
             "provisioned_repos": self.context.record.provisioned_repos,
@@ -216,6 +217,19 @@ class SessionOperations:
     def _workspace_repo(self) -> WorkspaceRepository:
         config = self._config()
         return WorkspaceRepository(config.session.base_path)
+
+    def _memory_service(self) -> SessionMemoryService:
+        config = self._config()
+        if not config.memory.enabled:
+            raise ValueError("Memory is disabled in the current configuration")
+        return SessionMemoryService.from_context(self.context, config)
+
+    def memory_retain(self, scope: str, content: str, context: str | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._memory_service().retain(scope=scope, content=content, context=context, metadata=metadata)
+
+    def memory_recall(self, query: str, limit: int = 5, scope: str | None = None) -> dict[str, Any]:
+        return self._memory_service().recall(query=query, limit=limit, scope=scope)
+
 
     def _append_message(self, text: str) -> None:
         self._workspace_repo().append_message(

@@ -9,6 +9,7 @@ import yaml
 from .models import (
     AgentRuntimeConfig,
     GitHubConfig,
+    MemoryConfig,
     ProjectSpec,
     SessionConfig,
     TillerConfig,
@@ -54,6 +55,7 @@ def load_config(path: str | Path) -> TillerConfig:
     session_raw = raw.get("session", {})
     projects_raw = raw.get("projects", {})
     github_raw = raw.get("github", {})
+    memory_raw = raw.get("memory", {})
 
     projects = {
         name: ProjectSpec(
@@ -96,5 +98,15 @@ def load_config(path: str | Path) -> TillerConfig:
             url=github_raw.get("url", "https://api.github.com"),
             token=github_raw.get("token"),
             token_env=github_raw.get("token_env", "GITHUB_API_TOKEN"),
+        ),
+        memory=MemoryConfig(
+            enabled=bool(memory_raw.get("enabled", False)),
+            provider=memory_raw.get("provider", "local"),
+            base_path=expand_path(memory_raw.get("base_path", "~/.tiller/memory")),
+            project=memory_raw.get("project"),
+            llm_provider=memory_raw.get("llm_provider", "openai"),
+            llm_model=memory_raw.get("llm_model"),
+            llm_api_key=memory_raw.get("llm_api_key"),
+            llm_api_key_env=memory_raw.get("llm_api_key_env", "OPENAI_API_KEY"),
         ),
     )

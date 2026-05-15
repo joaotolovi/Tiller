@@ -30,6 +30,22 @@ github:
   token_env: GITHUB_API_TOKEN
   # token: github_pat_xxx
 
+memory:
+  enabled: true
+  provider: hindsight
+  base_path: ~/.tiller/memory
+  # Optional default project name for project-scoped memories.
+  # project: backend
+  # For embedded Hindsight support, install:
+  #   uv sync --extra memory-hindsight
+  # For LangMem support, install:
+  #   uv sync --extra memory-langmem
+  # provider: hindsight
+  # llm_provider: openai
+  # llm_model: gpt-5-mini
+  # llm_api_key_env: OPENAI_API_KEY
+  # provider: langmem
+
 projects:
   backend:
     url: https://github.com/your-org/backend

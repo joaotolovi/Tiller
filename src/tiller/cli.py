@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "setup":
         return asyncio.run(run_setup(args.config))
 
-    if args.command in {"tracker", "project", "github", "session"}:
+    if args.command in {"tracker", "project", "github", "session", "memory"}:
         return handle_session_command(args)
 
     config = load_config(args.config)

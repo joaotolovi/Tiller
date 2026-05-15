@@ -244,7 +244,7 @@ class TelegramTrackerAdapter(TrackerAdapter):
             state.tasks[task_id] = self._new_task_payload(task_id=task_id, chat_id=chat_id, message=message, text=text)
             return
 
-        payload.setdefault("comments", []).append(self._comment_payload_from_message(message, fallback_text=text))
+        self._append_or_merge_comment(payload, message, fallback_text=text)
         attachments = self._message_attachments(message)
         if attachments:
             payload.setdefault("attachments", []).extend(attachments)
@@ -288,6 +288,27 @@ class TelegramTrackerAdapter(TrackerAdapter):
             "body": str(message.get("text") or message.get("caption") or fallback_text),
             "created_at": self._message_timestamp(message),
         }
+
+    def _append_or_merge_comment(self, payload: dict[str, Any], message: dict[str, Any], fallback_text: str = "") -> None:
+        comments = payload.setdefault("comments", [])
+        comment = self._comment_payload_from_message(message, fallback_text=fallback_text)
+        if comments and self._should_merge_comment(comments[-1], comment):
+            previous_body = str(comments[-1].get("body") or "").strip()
+            next_body = str(comment.get("body") or "").strip()
+            if next_body:
+                comments[-1]["body"] = f"{previous_body}\n{next_body}" if previous_body else next_body
+            comments[-1]["id"] = str(comment.get("id") or comments[-1].get("id") or "")
+            return
+        comments.append(comment)
+
+    def _should_merge_comment(self, previous: dict[str, Any], current: dict[str, Any]) -> bool:
+        previous_author = str(previous.get("author") or "").strip()
+        current_author = str(current.get("author") or "").strip()
+        if not previous_author or previous_author != current_author:
+            return False
+        previous_created_at = str(previous.get("created_at") or "").strip()
+        current_created_at = str(current.get("created_at") or "").strip()
+        return bool(previous_created_at and previous_created_at == current_created_at)
 
     def _message_attachments(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         attachments: list[dict[str, Any]] = []
@@ -356,6 +377,9 @@ class SyncTelegramTrackerAdapter(SyncTrackerAdapter):
         self._client = httpx.Client(base_url=f"{base_url.rstrip('/')}/bot{bot_token}", timeout=30.0)
         self.allowed_chat_ids = {str(item) for item in (allowed_chat_ids or [])}
         self.allowed_user_ids = {str(item) for item in (allowed_user_ids or [])}
+
+    def _message_timestamp(self, message: dict[str, Any]) -> str:
+        return TelegramTrackerAdapter._message_timestamp(self, message)
 
     def get_task(self, task_id: str) -> Task:
         payload = self.store.load().tasks.get(task_id)

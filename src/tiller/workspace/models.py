@@ -27,7 +27,7 @@ class WorkItemRecord:
     title: str
     description: str
     source_status: str
-    internal_status: str
+    state: str
     comments_count: int = 0
     attachments: list[LocalAttachment] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -41,7 +41,7 @@ class SessionState:
     external_task_id: str
     tracker_type: str
     workspace: Path
-    status: str
+    state: str
     agent_name: str
     config_path: Path | None = None
     process_id: int | None = None

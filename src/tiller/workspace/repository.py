@@ -28,7 +28,7 @@ class WorkspaceRepository:
             external_task_id=payload["external_task_id"],
             tracker_type=payload["tracker_type"],
             workspace=Path(payload["workspace"]),
-            status=payload["status"],
+            state=payload.get("state") or payload.get("status", "stopped"),
             agent_name=payload["agent_name"],
             config_path=Path(payload["config_path"]) if payload.get("config_path") else None,
             process_id=payload.get("process_id"),
@@ -61,7 +61,7 @@ class WorkspaceRepository:
             title=payload.get("title", ""),
             description=payload.get("description", ""),
             source_status=payload.get("source_status", ""),
-            internal_status=payload.get("internal_status", ""),
+            state=payload.get("state", "stopped"),
             comments_count=int(payload.get("comments_count", 0)),
             attachments=[
                 LocalAttachment(

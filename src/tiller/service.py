@@ -103,7 +103,7 @@ class TillerService:
             ),
         )
         record.process_id = spawn_result.process_id
-        record.status = "running"
+        record.state = "running"
         record.updated_at = self.runtime.now()
         record.last_checkpoint = "agent_started"
         self.runtime.mark_agent_started(
@@ -134,7 +134,7 @@ class TillerService:
         finally:
             self._active_processes.pop(task_id, None)
 
-        record.status = await self.runtime.finalize_session(
+        record.state = await self.runtime.finalize_session(
             task=task,
             record=record,
             workspace=paths.root,
@@ -146,7 +146,7 @@ class TillerService:
         logger.info("Agent finished task_id=%s internal_task_id=%s exit_code=%s", task_id, record.internal_task_id, exit_code)
 
         self.session_manager.cleanup(paths)
-        logger.info("Session finalized task_id=%s internal_task_id=%s status=%s workspace=%s", task_id, record.internal_task_id, record.status, paths.root)
+        logger.info("Session finalized task_id=%s internal_task_id=%s state=%s workspace=%s", task_id, record.internal_task_id, record.state, paths.root)
 
     async def shutdown(self) -> None:
         if not self.active_sessions:

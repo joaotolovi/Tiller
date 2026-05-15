@@ -71,7 +71,7 @@ class SessionManager:
             record.agent_name = agent_name
             record.workspace = paths.root
             record.config_path = Path("tiller.yaml").resolve()
-            record.status = "resumed"
+            record.state = "stopped"
             record.resume_count += 1
             record.last_checkpoint = "session_prepared"
             record.updated_at = datetime.now(UTC).isoformat()
@@ -86,7 +86,7 @@ class SessionManager:
                 config_path=Path("tiller.yaml").resolve(),
                 started_at=datetime.now(UTC).isoformat(),
                 updated_at=datetime.now(UTC).isoformat(),
-                status="prepared",
+                state="stopped",
                 resume_count=0,
                 last_checkpoint="session_prepared",
             )
@@ -151,7 +151,7 @@ class SessionManager:
             started_at=payload.get("started_at"),
             updated_at=payload.get("updated_at"),
             completed_at=payload.get("completed_at"),
-            status=payload.get("status", "created"),
+            state=payload.get("state") or payload.get("status", "stopped"),
             resume_count=int(payload.get("resume_count", 0)),
             last_checkpoint=payload.get("last_checkpoint"),
             provisioned_repos=list(payload.get("provisioned_repos", [])),
@@ -199,7 +199,7 @@ class SessionManager:
             external_task_id=record.tracker_task_id,
             tracker_type=self.config.tracker.type,
             workspace=paths.root,
-            status=record.status,
+            state=record.state,
             agent_name=record.agent_name,
             config_path=record.config_path,
             process_id=record.process_id,
@@ -217,7 +217,7 @@ class SessionManager:
             title=task.title,
             description=task.description,
             source_status=task.status,
-            internal_status=record.status,
+            state=record.state,
             comments_count=len(task.comments),
             attachments=[
                 LocalAttachment(
@@ -267,7 +267,7 @@ class SessionManager:
                     "external_task_id": task.id,
                     "tracker_type": self.config.tracker.type,
                     "workspace": str(paths.root),
-                    "resumed": record.status == "resumed",
+                    "resumed": record.resume_count > 0,
                     "attachments_downloaded": [str(path) for path in attachments],
                 },
             ),

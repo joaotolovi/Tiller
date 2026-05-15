@@ -36,15 +36,16 @@ def load_session_context(explicit: str | Path | None = None, *, cwd: Path | None
     root = resolve_session_root(explicit, cwd=cwd)
     payload = json.loads((root / "session.json").read_text(encoding="utf-8"))
     config_path = Path(payload["config_path"]).expanduser().resolve()
+    tracker_task_id = payload.get("tracker_task_id") or payload["external_task_id"]
     record = SessionRecord(
         internal_task_id=payload["internal_task_id"],
-        tracker_task_id=payload["tracker_task_id"],
+        tracker_task_id=tracker_task_id,
         agent_name=payload["agent_name"],
         workspace=Path(payload["workspace"]),
         config_path=config_path,
         process_id=payload.get("process_id"),
         started_at=payload.get("started_at"),
-        status=payload.get("status", "created"),
+        state=payload.get("state") or payload.get("status", "stopped"),
         provisioned_repos=list(payload.get("provisioned_repos", [])),
     )
     return SessionContext(root=root, record=record, config_path=config_path)
