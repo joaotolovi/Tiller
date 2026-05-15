@@ -478,6 +478,50 @@ def test_build_tracker_server_includes_cli_parity_tools(tmp_path: Path) -> None:
     } <= tool_names
 
 
+def test_build_tracker_server_does_not_expose_memory_tools(tmp_path: Path) -> None:
+    session_root = tmp_path / "session-mcp-memory"
+    session_root.mkdir(parents=True, exist_ok=True)
+    (session_root / "session.json").write_text(
+        json.dumps(
+            {
+                "internal_task_id": "TASK-555",
+                "tracker_task_id": "42",
+                "agent_name": "stub",
+                "workspace": str(session_root),
+                "config_path": str(tmp_path / "tiller-mcp-memory.yaml"),
+                "state": "running",
+                "provisioned_repos": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_root / "projects.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "tiller-mcp-memory.yaml").write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+agent:
+  default: stub
+memory:
+  enabled: true
+  provider: local
+  base_path: %s
+projects: {}
+session:
+  base_path: %s
+""" % ((tmp_path / "memory-mcp-store").as_posix(), tmp_path.as_posix()),
+        encoding="utf-8",
+    )
+
+    server = build_tracker_server(session_root)
+    tool_names = sorted(server._tool_manager._tools.keys())
+
+    assert "memory_retain" not in tool_names
+    assert "memory_recall" not in tool_names
+    assert "memory_reflect" not in tool_names
+
+
 def test_sync_clickup_comments_serialize_as_task_comments() -> None:
     class FakeResponse:
         def __init__(self, payload: dict):
@@ -1621,167 +1665,6 @@ def test_memory_provider_retain_recall(tmp_path: Path) -> None:
     assert recall.bank_id == "session:TASK-123"
     assert len(recall.entries) == 1
     assert recall.entries[0].content == "Run pytest with -q"
-
-
-def test_session_operations_memory_roundtrip(tmp_path: Path) -> None:
-    from tiller.operations import SessionOperations
-
-    session_root = tmp_path / "session-memory"
-    session_root.mkdir(parents=True, exist_ok=True)
-    (session_root / "session.json").write_text(
-        json.dumps(
-            {
-                "internal_task_id": "TASK-123",
-                "tracker_task_id": "1",
-                "agent_name": "stub",
-                "workspace": str(session_root),
-                "config_path": str(tmp_path / "tiller-memory.yaml"),
-                "state": "running",
-                "provisioned_repos": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (session_root / "projects.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "tiller-memory.yaml").write_text(
-        """
-tracker:
-  type: memory
-  trigger_status: in_development
-agent:
-  default: stub
-memory:
-  enabled: true
-  provider: local
-  base_path: %s
-projects: {}
-session:
-  base_path: %s
-""" % ((tmp_path / "memory-store").as_posix(), tmp_path.as_posix()),
-        encoding="utf-8",
-    )
-
-    operations = SessionOperations(session_root)
-    retained = operations.memory_retain("history", "Project uses poetry", "tooling")
-    recalled = operations.memory_recall("poetry", scope="history")
-
-    assert retained["scope"] == "history"
-    assert retained["bank_id"] == "history"
-    assert retained["metadata"]["task_id"] == "1"
-    assert retained["metadata"]["scope"] == "history"
-    assert len(recalled["entries"]) == 1
-    assert recalled["entries"][0]["content"] == "Project uses poetry"
-
-
-def test_handle_memory_command_outputs_payload(tmp_path: Path, capsys) -> None:
-    from tiller.commands import handle_session_command
-
-    session_root = tmp_path / "session-memory-cli"
-    session_root.mkdir(parents=True, exist_ok=True)
-    (session_root / "session.json").write_text(
-        json.dumps(
-            {
-                "internal_task_id": "TASK-321",
-                "tracker_task_id": "9",
-                "agent_name": "stub",
-                "workspace": str(session_root),
-                "config_path": str(tmp_path / "tiller-memory-cli.yaml"),
-                "state": "running",
-                "provisioned_repos": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (session_root / "projects.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "tiller-memory-cli.yaml").write_text(
-        """
-tracker:
-  type: memory
-  trigger_status: in_development
-agent:
-  default: stub
-memory:
-  enabled: true
-  provider: local
-  base_path: %s
-projects: {}
-session:
-  base_path: %s
-""" % ((tmp_path / "memory-cli-store").as_posix(), tmp_path.as_posix()),
-        encoding="utf-8",
-    )
-
-    exit_code = handle_session_command(
-        __import__("argparse").Namespace(
-            command="memory",
-            memory_command="retain",
-            scope="project:backend",
-            content="The repo uses pytest",
-            context="tests",
-            query=None,
-            limit=5,
-            session=str(session_root),
-        )
-    )
-    rendered = json.loads(capsys.readouterr().out)
-
-    assert rendered["scope"] == "project:backend"
-    assert rendered["content"] == "The repo uses pytest"
-    assert rendered["context"] == "tests"
-    assert rendered["bank_id"] == "project:backend"
-
-
-def test_build_tracker_server_exposes_memory_tools(tmp_path: Path) -> None:
-    session_root = tmp_path / "session-mcp-memory"
-    session_root.mkdir(parents=True, exist_ok=True)
-    (session_root / "session.json").write_text(
-        json.dumps(
-            {
-                "internal_task_id": "TASK-555",
-                "tracker_task_id": "42",
-                "agent_name": "stub",
-                "workspace": str(session_root),
-                "config_path": str(tmp_path / "tiller-mcp-memory.yaml"),
-                "state": "running",
-                "provisioned_repos": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (session_root / "projects.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "tiller-mcp-memory.yaml").write_text(
-        """
-tracker:
-  type: memory
-  trigger_status: in_development
-agent:
-  default: stub
-memory:
-  enabled: true
-  provider: local
-  base_path: %s
-projects: {}
-session:
-  base_path: %s
-""" % ((tmp_path / "memory-mcp-store").as_posix(), tmp_path.as_posix()),
-        encoding="utf-8",
-    )
-
-    async def run_test() -> None:
-        server = build_tracker_server(session_root)
-        await server._tool_manager.get_tool("memory_retain").fn(content="Use pytest -q", scope="history", context="tests")
-        response = await server._tool_manager.get_tool("memory_recall").fn(query="pytest", limit=5, scope="history")
-        payload = json.loads(response)
-        tool_names = sorted(server._tool_manager._tools.keys())
-
-        assert payload["scope"] == "history"
-        assert payload["bank_id"] == "history"
-        assert payload["entries"][0]["content"] == "Use pytest -q"
-        assert "memory_retain" in tool_names
-        assert "memory_recall" in tool_names
-        assert "memory_reflect" not in tool_names
-
-    asyncio.run(run_test())
 
 
 

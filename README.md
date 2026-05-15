@@ -10,6 +10,8 @@
 
 **Tracker-driven harness for autonomous coding agents.**
 
+*Tiller is a simple, tracker-agnostic workflow layer that connects coding agents to real engineering workflows. It provides everything agents need to execute engineering work end-to-end — from task understanding to pull request delivery — with tracker awareness, multi-repo coordination, and persistent workflow memory that compounds over time. No heavy workflows, orchestration engines, or rigid process definitions. Just the minimum necessary structure to achieve maximum execution performance.*
+
 Tiller watches your tracker, finds the work to be done, opens an isolated session, starts the selected coding-agent CLI, gives it the right context, and lets the agent work like a developer.
 
 Example: move a ClickUp task to `Develop`, and Tiller starts Codex/Claude/Aider in a fresh workspace with the task context. Or use Telegram as a chat-native tracker: a message starts the active task for that chat, `/new` prepares the next one, the agent posts progress back into the same conversation, and optional chat/user ID filters limit who can create work.
@@ -18,6 +20,15 @@ Example: move a ClickUp task to `Develop`, and Tiller starts Codex/Claude/Aider 
 
 Tiller is built on a simple philosophy: no workflows, no orchestration, no rigidity.
 It provides only the minimum structure needed for the agent to achieve maximum performance: clean context, the right tools, and room to work.
+
+It also gives the agent a way to **learn over time**.
+Tiller can keep durable memory so the agent gradually understands:
+- your preferences
+- your product and business context
+- the rules and conventions of each repository
+- historical decisions that should not be rediscovered every time
+
+That means the more you use Tiller, the more context the agent can carry forward across tasks.
 
 ---
 
@@ -62,9 +73,9 @@ Agent CLI launcher | Starts the selected coding-agent CLI with the task goal in 
 Project-local MCP bootstrap | Prepares MCP config files for supported agent CLIs inside the session workspace.
 Local Tiller commands | Gives the agent a universal interface to read tasks, comment, request repos, inspect session state, and work with GitHub.
 GitHub integration | Uses local `tiller github ...` commands backed by the GitHub REST API for auth checks, repo checks, and PR creation.
-Session memory tools | Exposes simple `retain` and `recall` memory operations through the existing CLI and MCP layers.
-Repo provisioning | Lets the agent request configured repos and receive an isolated repo copy inside its session.
+Durable memory | Lets the agent keep useful context across tasks, including user preferences, business rules, product knowledge, and repo conventions.
 Session memory | Keeps `STATE.md` and session metadata so paused work can resume with context.
+Repo provisioning | Lets the agent request configured repos and receive an isolated repo copy inside its session.
 
 > The agent is the developer, not the workflow engine.
 
@@ -196,7 +207,41 @@ session:
   keep_finished_sessions: true
 ```
 
-### 3. Optional: enable Hindsight memory provider
+### 3. Memory: help the agent learn your context
+
+Tiller can keep durable memory so the agent improves over time instead of relearning the same context on every task.
+
+This is useful for things like:
+- user preferences
+- repository-specific conventions
+- business logic
+- product knowledge
+- historical context worth preserving
+
+### Local memory
+
+By default, memory is simple and local.
+
+You can enable it in `tiller.yaml`:
+
+```yaml
+memory:
+  enabled: true
+  provider: local
+  base_path: ~/.tiller/memory
+```
+
+With the local provider, Tiller points the agent to a persistent memory directory and instructs it to:
+- read from that directory when useful
+- write durable knowledge as Markdown (`.md`) files
+- organize the files in the simplest way that makes sense
+
+This keeps memory:
+- easy for agents to use
+- easy for humans to inspect and edit
+- independent from MCP or special memory commands
+
+### Optional advanced memory providers
 
 Default install stays light:
 
@@ -224,7 +269,7 @@ Then set `memory.provider: hindsight` or `memory.provider: langmem` in `tiller.y
 uv run tiller discover-agents --config tiller.yaml
 ```
 
-### 4. Start the service
+### 5. Start the service
 
 ```bash
 uv run tiller run --config tiller.yaml
@@ -247,19 +292,12 @@ Command | Purpose
 `uv run tiller project use backend --reason "..."` | Provisions a repo copy into the current session.
 `uv run tiller github auth-status` | Verifies GitHub API access for the current session.
 `uv run tiller github create-pr --repo backend --title "..." --body-file pr.md` | Opens a PR through the GitHub REST API.
-`uv run tiller memory retain "..." --scope history --context "..."` | Stores a useful memory with explicit scope.
-`uv run tiller memory recall "..."` | Searches retained memories across available scopes.
 `uv run tiller session status` | Shows the current session state.
 
-By default, memory uses the lightweight local provider. To use the embedded Hindsight provider, install the optional extra with `uv sync --extra memory-hindsight` and set `memory.provider: hindsight`. To use LangMem, install `uv sync --extra memory-langmem` and set `memory.provider: langmem`.
+For local memory, the agent uses the configured memory directory directly.
+It reads and writes Markdown memories there instead of using dedicated memory CLI commands.
 
-Memory scopes are explicit on write:
-- `project:<project_name>` for repo-specific knowledge
-- `user` for global user preferences
-- `domain` for business/domain rules
-- `history` for globally useful historical context
-
-`memory recall` accepts an optional scope. Without one, Tiller searches across available scopes.
+If you use advanced providers such as Hindsight or LangMem, configure them under `memory:` in `tiller.yaml`.
 
 ---
 
@@ -267,7 +305,7 @@ Memory scopes are explicit on write:
 
 1. Tiller polls the configured tracker for tasks in `trigger_status`.
 2. For each ready task, it creates or resumes an isolated session.
-3. The session receives task context, attachments, project metadata, `AGENTS.md`, `TASK.md`, and `STATE.md`.
+3. The session receives task context, attachments, project metadata, `AGENTS.md`, `TASK.md`, `task.json`, and `STATE.md`.
 4. Tiller starts the configured agent CLI in that workspace.
 5. The agent uses local `tiller ...` commands to inspect the task, comment progress, request repos, and inspect session state.
 6. Repositories are provisioned as isolated session-local repo copies under the session when requested.
@@ -283,6 +321,7 @@ Each tracker task gets a workspace similar to:
 ~/.tiller/sessions/<task-session>/
 ├── AGENTS.md
 ├── TASK.md
+├── task.json
 ├── STATE.md
 ├── projects.json
 ├── session.json
@@ -302,6 +341,8 @@ Each tracker task gets a workspace similar to:
 Depending on the selected adapter, Tiller may also write agent-specific MCP project files such as `.mcp.json`, `opencode.json`, `.continue/mcpServers/tiller.yaml`, `.augment/settings.json`, `.factory/mcp.json`, `gptme.toml`, or `mcp.json`.
 
 The agent starts inside this workspace. It can read the task context immediately and use local `tiller` commands for tracker, project, and session operations.
+
+If local memory is enabled, the agent also receives a persistent memory directory path in `AGENTS.md` and can read/write Markdown memories there as needed.
 
 ---
 
@@ -353,6 +394,8 @@ Implemented:
 - optional GitHub integration through local `tiller github ...` commands backed by the REST API
 - repo provisioning with session-local seed clones and repo copies
 - session memory with `STATE.md`
+- durable memory with a simple local Markdown directory
+- optional advanced memory providers (`hindsight`, `langmem`)
 
 Planned/evolving:
 

@@ -136,16 +136,6 @@ def build_tracker_server(session_root: Path) -> FastMCP:
         _log_tool_call(session_root, tracker_task_id, "session_paths")
         return json.dumps(SessionOperations(session_root).session_paths(), indent=2, ensure_ascii=False)
 
-    @mcp.tool()
-    async def memory_retain(content: str, scope: str, context: str | None = None) -> str:
-        _log_tool_call(session_root, tracker_task_id, "memory_retain", scope=scope, content_length=len(content))
-        return json.dumps(SessionOperations(session_root).memory_retain(scope=scope, content=content, context=context), indent=2, ensure_ascii=False)
-
-    @mcp.tool()
-    async def memory_recall(query: str, limit: int = 5, scope: str | None = None) -> str:
-        _log_tool_call(session_root, tracker_task_id, "memory_recall", query=query, limit=limit, scope=scope)
-        return json.dumps(SessionOperations(session_root).memory_recall(query=query, limit=limit, scope=scope), indent=2, ensure_ascii=False)
-
     return mcp
 
 

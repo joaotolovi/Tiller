@@ -49,21 +49,6 @@ def register_session_subcommands(subparsers: argparse._SubParsersAction[argparse
     session_parser.add_argument("session_command", choices=["status", "paths"])
     session_parser.add_argument("--session", dest="session", default=None)
 
-    memory_parser = subparsers.add_parser("memory", help="Interact with session memory")
-    memory_subparsers = memory_parser.add_subparsers(dest="memory_command", required=True)
-
-    memory_retain = memory_subparsers.add_parser("retain", help="Store a memory for the current session")
-    memory_retain.add_argument("content")
-    memory_retain.add_argument("--scope", dest="scope", required=True)
-    memory_retain.add_argument("--context", dest="context", default=None)
-    memory_retain.add_argument("--session", dest="session", default=None)
-
-    memory_recall = memory_subparsers.add_parser("recall", help="Search memories for the current session")
-    memory_recall.add_argument("query")
-    memory_recall.add_argument("--scope", dest="scope", default=None)
-    memory_recall.add_argument("--limit", dest="limit", type=int, default=5)
-    memory_recall.add_argument("--session", dest="session", default=None)
-
 
 def handle_session_command(args: argparse.Namespace) -> int:
     operations_module.GitHubClient = GitHubClient
@@ -77,8 +62,6 @@ def handle_session_command(args: argparse.Namespace) -> int:
         return _print_payload(_handle_github_command(args, operations))
     if args.command == "session":
         return _print_payload(_handle_session_info_command(args, operations))
-    if args.command == "memory":
-        return _print_payload(_handle_memory_command(args, operations))
     raise ValueError(f"Unsupported session command: {args.command}")
 
 
@@ -151,16 +134,6 @@ def _handle_session_info_command(args: argparse.Namespace, operations: SessionOp
         return operations.session_paths()
 
     raise ValueError(f"Unsupported session command: {args.session_command}")
-
-
-def _handle_memory_command(args: argparse.Namespace, operations: SessionOperations):
-    if args.memory_command == "retain":
-        return operations.memory_retain(args.scope, args.content, args.context)
-
-    if args.memory_command == "recall":
-        return operations.memory_recall(args.query, args.limit, args.scope)
-
-    raise ValueError(f"Unsupported memory command: {args.memory_command}")
 
 
 def _read_pr_body(body: str | None, body_file: str | None) -> str:

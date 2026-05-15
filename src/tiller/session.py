@@ -56,6 +56,9 @@ class SessionManager:
         paths.attachments_dir.mkdir(parents=True, exist_ok=True)
         paths.mcp_dir.mkdir(parents=True, exist_ok=True)
 
+        if self.config.memory.enabled and self.config.memory.provider == "local":
+            self.config.memory.base_path.mkdir(parents=True, exist_ok=True)
+
         attachments = await self.tracker.download_attachments(task.id, paths.attachments_dir)
         mcp_payload = write_mcp_config(paths.mcp_config, self.config)
         write_native_mcp_project_files(paths.root, mcp_payload)
@@ -63,7 +66,15 @@ class SessionManager:
 
         task_payload = self._task_payload(task)
         dump_json(paths.task_json, task_payload)
-        paths.agents_md.write_text(render_agents_md(tool_transport=tool_transport), encoding="utf-8")
+        paths.agents_md.write_text(
+            render_agents_md(
+                tool_transport=tool_transport,
+                memory_enabled=self.config.memory.enabled,
+                memory_provider=self.config.memory.provider,
+                memory_base_path=self.config.memory.base_path,
+            ),
+            encoding="utf-8",
+        )
         paths.task_md.write_text(render_task_md(task_payload), encoding="utf-8")
         self._ensure_state_md(paths, task, existing_record is not None)
 
