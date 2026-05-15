@@ -14,14 +14,13 @@
 
 Tiller watches your tracker, finds the work to be done, opens an isolated session, starts the selected coding-agent CLI, gives it the right context, and lets the agent work like a developer.
 
-Example: move a ClickUp task to `Develop`, and Tiller starts Codex/Claude/Aider in a fresh workspace with the task context. Or use Telegram as a chat-native tracker: a message starts the active task for that chat, `/new` prepares the next one, the agent posts progress back into the same conversation, and optional chat/user ID filters limit who can create work.
+Example: Move a task from ClickUp to Develop and Tiller starts Codex/Claude in a new workspace with the task's context. The agent publishes progress and reports blocks, works on the repositories needed to complete the task, and opens pull requests in all repositories worked on.
 
 **Your agent is treated like a developer. You are the helm.**
 
 Tiller is built on a simple philosophy: no workflows, no orchestration, no rigidity.
 It provides only the minimum structure needed for the agent to achieve maximum performance: clean context, the right tools, and room to work.
 
-It also gives the agent a way to **learn over time**.
 Tiller can keep durable memory so the agent gradually understands:
 - your preferences
 - your product and business context
