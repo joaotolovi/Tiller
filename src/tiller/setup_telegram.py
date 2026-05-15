@@ -10,7 +10,7 @@ class TelegramSetupProvider:
     async def collect(self) -> dict[str, object]:
         bot_token = await prompt_text("Telegram bot token", secret=True)
         state_path = await prompt_text("Local state path", default="~/.tiller/telegram-state.json")
-        trigger_status = (await prompt_text("Status que dispara o Tiller", default="new")).strip()
+        trigger_status = (await prompt_text("Status that triggers Tiller", default="new")).strip()
         poll_interval = int(await prompt_text("Polling interval in seconds", default="5"))
 
         tracker: dict[str, object] = {

@@ -1,62 +1,90 @@
+# Minimal configuration required to run Tiller.
+# Uncomment and adapt one tracker section, choose an agent, and define at least one project.
+
+# --- Minimum required -------------------------------------------------------
 tracker:
+  # ClickUp minimum:
   type: clickup
   token: YOUR_CLICKUP_TOKEN
   team_id: "YOUR_CLICKUP_TEAM_ID"
-  trigger_status: AIDEV
-  poll_interval: 60
-  # assignee: "CLICKUP_USER_ID"
-  # tag: backend
-  # Telegram example:
+  trigger_status: DEVELOP
+
+  # Telegram minimum:
   # type: telegram
   # bot_token: YOUR_TELEGRAM_BOT_TOKEN
   # state_path: ~/.tiller/telegram-state.json
-  # allowed_chat_ids:
-  #   - "123456789"
-  # allowed_user_ids:
-  #   - "987654321"
   # trigger_status: new
 
 agent:
   default: codex
-  # model: gpt-5.4
-  # The codex adapter runs with --yolo by default so the agent can operate
-  # headlessly without interactive approval prompts.
-  # options:
-  #   codex_extra_args: []
-
-github:
-  enabled: true
-  url: https://api.github.com
-  token_env: GITHUB_API_TOKEN
-  # token: github_pat_xxx
-
-memory:
-  enabled: true
-  provider: hindsight
-  base_path: ~/.tiller/memory
-  # Optional default project name for project-scoped memories.
-  # For embedded Hindsight support, install:
-  #   uv sync --extra memory-hindsight
-  # For LangMem support, install:
-  #   uv sync --extra memory-langmem
-  # provider: hindsight
-  # llm_provider: openai
-  # llm_model: gpt-5-mini
-  # llm_api_key_env: OPENAI_API_KEY
-  # provider: langmem
 
 projects:
   backend:
     url: https://github.com/your-org/backend
-    default_branch: main
-  frontend:
-    url: https://github.com/your-org/frontend
-    default_branch: main
-  app:
-    url: https://github.com/your-org/app
-    default_branch: main
 
 session:
   base_path: ~/.tiller/sessions
-  cleanup_after_hours: 24
-  keep_finished_sessions: true
+
+# --- Optional settings ------------------------------------------------------
+# Everything below is optional. Uncomment what you need.
+
+# tracker:
+#   # Shared tracker options
+#   poll_interval: 60
+#   processing_status: IN_PROGRESS
+#   done_status: DONE
+#
+#   # ClickUp-only options
+#   assignee: "CLICKUP_USER_ID"
+#   tag: backend
+#
+#   # Telegram-only options
+#   allowed_chat_ids:
+#     - "123456789"
+#   allowed_user_ids:
+#     - "987654321"
+
+# agent:
+#   model: gpt-5.4
+#   adapters_path: ~/.tiller/agents.json
+#   options:
+#     approval_policy: never
+#     sandbox: danger-full-access
+
+# github:
+#   enabled: true
+#   url: https://api.github.com
+#   token_env: GITHUB_API_TOKEN
+#   token: github_pat_xxx
+
+# memory:
+#   enabled: true
+#   provider: local
+#   base_path: ~/.tiller/memory
+#   project: backend
+#
+#   # Optional LLM-backed memory settings for external providers.
+#   # Use these when provider requires them, such as hindsight or langmem.
+#   llm_provider: openai
+#   llm_model: gpt-5-mini
+#   llm_api_key_env: OPENAI_API_KEY
+#   llm_api_key: sk-...
+#
+#   # Alternative providers:
+#   # provider: hindsight
+#   # provider: langmem
+
+# projects:
+#   backend:
+#     url: https://github.com/your-org/backend
+#     default_branch: main
+#   frontend:
+#     url: https://github.com/your-org/frontend
+#     default_branch: main
+#   app:
+#     url: https://github.com/your-org/app
+#     default_branch: develop
+
+# session:
+#   cleanup_after_hours: 24
+#   keep_finished_sessions: true

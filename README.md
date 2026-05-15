@@ -118,23 +118,6 @@ Installer modes:
 - `reinstall` — force reinstall in place
 - `uninstall` — removes the installed app and service, preserving config/logs
 
-Examples:
-
-### Linux / macOS modes
-
-```bash
-TILLER_INSTALL_MODE=upgrade curl -fsSL https://raw.githubusercontent.com/joaotolovi/Tiller/master/installers/bootstrap.sh | sh
-TILLER_INSTALL_MODE=reinstall sh installers/install.sh
-TILLER_INSTALL_MODE=uninstall sh installers/install.sh
-```
-
-### Windows modes
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\installers\install.ps1 -Mode upgrade
-powershell -ExecutionPolicy Bypass -File .\installers\install.ps1 -Mode reinstall
-powershell -ExecutionPolicy Bypass -File .\installers\install.ps1 -Mode uninstall
-```
 
 Default locations:
 
@@ -276,6 +259,53 @@ uv run tiller run --config tiller.yaml
 ```
 
 Tiller will keep polling the tracker. When a task reaches `trigger_status`, it creates a session and starts the configured agent.
+
+---
+
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph Input Layer
+        Tracker[Trackers<br/>ClickUp / Telegram / others]
+    end
+
+    subgraph Coordination Layer
+        Tiller[Tiller<br/>workflow coordination layer]
+    end
+
+    subgraph Session Layer
+        Session[Task session<br/>context, files, state, history]
+    end
+
+    subgraph Tool Layer
+        Tools[Agent tools<br/>local CLI commands + MCP]
+    end
+
+    subgraph Execution Layer
+        Agent[Agent CLI<br/>Codex / Claude Code / Aider / others]
+    end
+
+    subgraph Work Layer
+        Repos[Project repositories<br/>one repo or many]
+        GitHub[GitHub / PR delivery]
+    end
+
+    subgraph Learning Layer
+        Memory[Persistent workflow memory]
+    end
+
+    Tracker --> Tiller
+    Tiller --> Session
+    Session --> Tools
+    Tools --> Agent
+    Agent --> Repos
+    Agent --> GitHub
+    Agent --> Session
+    Session --> Memory
+    Tiller --> Tracker
+```
 
 ---
 

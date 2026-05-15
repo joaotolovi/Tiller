@@ -217,10 +217,10 @@ class TelegramTrackerAdapter(TrackerAdapter):
         if text == "/new":
             state.awaiting_new_task_by_chat[chat_id] = True
             state.active_task_by_chat.pop(chat_id, None)
-            self._send_system_message(chat_id, "O que precisa?")
+            self._send_system_message(chat_id, "What do you need?")
             return
         if text == "/start":
-            self._send_system_message(chat_id, "Tiller é seu seu programador. Use /new para iniciar uma nova task.")
+            self._send_system_message(chat_id, "Tiller is your programmer. Use /new to start a new task.")
             return
         if text.startswith("/"):
             return

@@ -9,7 +9,7 @@ class ClickUpSetupProvider:
     label = "ClickUp"
 
     async def collect(self) -> dict[str, object]:
-        token = await prompt_text("Token do ClickUp", secret=True)
+        token = await prompt_text("ClickUp token", secret=True)
         adapter = ClickUpTrackerAdapter(token=token, team_id="setup")
         try:
             teams = await adapter.list_teams()
@@ -21,7 +21,7 @@ class ClickUpSetupProvider:
             )
             assert team_id is not None
 
-            trigger_status = (await prompt_text("Status que dispara o Tiller", default="DEVELOP")).strip()
+            trigger_status = (await prompt_text("Status that triggers Tiller", default="DEVELOP")).strip()
 
             tracker: dict[str, object] = {
                 "type": "clickup",

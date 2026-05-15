@@ -737,11 +737,11 @@ def test_telegram_tracker_creates_task_comments_and_rotates_on_new(tmp_path: Pat
     assert [comment.body for comment in tasks[1].comments] == ["segunda task"]
     assert adapter._client.sent_messages[0] == {
         "chat_id": "100",
-        "text": "Tiller é seu seu programador. Use /new para iniciar uma nova task.",
+        "text": "Tiller is your programmer. Use /new to start a new task.",
     }
     assert adapter._client.sent_messages[1] == {
         "chat_id": "100",
-        "text": "O que precisa?",
+        "text": "What do you need?",
     }
 
     asyncio.run(adapter.add_comment("telegram-1", "andamento"))
@@ -791,7 +791,7 @@ def test_telegram_tracker_merges_fragmented_long_messages_into_single_comment(tm
                 "message": {
                     "message_id": 70,
                     "date": 1715781636,
-                    "text": "Parte 1 de uma mensagem longa",
+                    "text": "Part 1 of a long message",
                     "chat": {"id": 100},
                     "from": {"id": 7, "first_name": "Jhon"},
                 },
@@ -801,7 +801,7 @@ def test_telegram_tracker_merges_fragmented_long_messages_into_single_comment(tm
                 "message": {
                     "message_id": 71,
                     "date": 1715781636,
-                    "text": "Parte 2 da mesma mensagem longa",
+                    "text": "Part 2 of the same long message",
                     "chat": {"id": 100},
                     "from": {"id": 7, "first_name": "Jhon"},
                 },
@@ -811,7 +811,7 @@ def test_telegram_tracker_merges_fragmented_long_messages_into_single_comment(tm
                 "message": {
                     "message_id": 72,
                     "date": 1715781636,
-                    "text": "Parte 3 da mesma mensagem longa",
+                    "text": "Part 3 of the same long message",
                     "chat": {"id": 100},
                     "from": {"id": 7, "first_name": "Jhon"},
                 },
@@ -822,7 +822,7 @@ def test_telegram_tracker_merges_fragmented_long_messages_into_single_comment(tm
     tasks = asyncio.run(adapter.list_tasks("new"))
     assert [task.id for task in tasks] == ["telegram-1"]
     assert len(tasks[0].comments) == 1
-    assert tasks[0].comments[0].body == "Parte 1 de uma mensagem longa\nParte 2 da mesma mensagem longa\nParte 3 da mesma mensagem longa"
+    assert tasks[0].comments[0].body == "Part 1 of a long message\nPart 2 of the same long message\nPart 3 of the same long message"
 
 
 def test_sync_telegram_tracker_add_comment_persists_comment(tmp_path: Path, monkeypatch) -> None:
