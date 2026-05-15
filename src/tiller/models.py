@@ -105,6 +105,7 @@ class SessionPaths:
     root: Path
     agents_md: Path
     task_md: Path
+    task_json: Path
     state_md: Path
     projects_json: Path
     repos_dir: Path
@@ -124,10 +125,7 @@ class SessionRecord:
     process_id: int | None = None
     started_at: str | None = None
     updated_at: str | None = None
-    completed_at: str | None = None
     state: str = "stopped"
-    resume_count: int = 0
-    last_checkpoint: str | None = None
     provisioned_repos: list[str] = field(default_factory=list)
 
     @property

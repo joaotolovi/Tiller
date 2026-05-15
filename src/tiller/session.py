@@ -2,20 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-import uuid
 
 from .agents.common import write_native_mcp_project_files
 from .config import dump_json
 from .mcp import write_mcp_config
 from .models import ProjectSpec, SessionPaths, SessionRecord, Task, TillerConfig
+from .repo_seed import RepoSeedManager
 from .templates import render_agents_md, render_task_md
 from .trackers import TrackerAdapter
-from .repo_seed import RepoSeedManager
-from .workspace import EventRecord, ExternalRef, LocalAttachment, MessageRecord, SessionState, TrackerMetaRecord, WorkItemRecord, WorkspaceRepository
+from .workspace import EventRecord, MessageRecord, SessionState, WorkspaceRepository
 
 
 class SessionManager:
@@ -36,6 +36,7 @@ class SessionManager:
             root=root,
             agents_md=root / "AGENTS.md",
             task_md=root / "TASK.md",
+            task_json=root / "task.json",
             state_md=root / "STATE.md",
             projects_json=root / "projects.json",
             repos_dir=root / "repos",
@@ -58,25 +59,24 @@ class SessionManager:
         attachments = await self.tracker.download_attachments(task.id, paths.attachments_dir)
         mcp_payload = write_mcp_config(paths.mcp_config, self.config)
         write_native_mcp_project_files(paths.root, mcp_payload)
-        projects_payload = self._projects_payload()
-        dump_json(paths.projects_json, projects_payload)
+        dump_json(paths.projects_json, self._projects_payload())
 
-        task_payload = self._task_payload(task, attachments)
+        task_payload = self._task_payload(task)
+        dump_json(paths.task_json, task_payload)
         paths.agents_md.write_text(render_agents_md(tool_transport=tool_transport), encoding="utf-8")
         paths.task_md.write_text(render_task_md(task_payload), encoding="utf-8")
         self._ensure_state_md(paths, task, existing_record is not None)
 
+        now = datetime.now(UTC).isoformat()
         if existing_record is not None:
             record = existing_record
             record.agent_name = agent_name
             record.workspace = paths.root
             record.config_path = Path("tiller.yaml").resolve()
             record.state = "stopped"
-            record.resume_count += 1
-            record.last_checkpoint = "session_prepared"
-            record.updated_at = datetime.now(UTC).isoformat()
+            record.updated_at = now
             if record.started_at is None:
-                record.started_at = datetime.now(UTC).isoformat()
+                record.started_at = now
         else:
             record = SessionRecord(
                 internal_task_id=internal_task_id,
@@ -84,15 +84,14 @@ class SessionManager:
                 agent_name=agent_name,
                 workspace=paths.root,
                 config_path=Path("tiller.yaml").resolve(),
-                started_at=datetime.now(UTC).isoformat(),
-                updated_at=datetime.now(UTC).isoformat(),
+                started_at=now,
+                updated_at=now,
                 state="stopped",
-                resume_count=0,
-                last_checkpoint="session_prepared",
             )
 
         dump_json(paths.state_json, record)
-        self._write_workspace_records(paths, record, task, attachments)
+        self._write_workspace_records(paths, record, task, resumed=existing_record is not None)
+        self._record_agent_ready(paths, task, attachments, resumed=existing_record is not None)
         return record, paths, mcp_payload
 
     def cleanup(self, paths: SessionPaths) -> None:
@@ -112,9 +111,10 @@ class SessionManager:
             for name, spec in self.config.projects.items()
         }
 
-    def _task_payload(self, task: Task, attachments: list[Path]) -> dict[str, Any]:
+    def _task_payload(self, task: Task) -> dict[str, Any]:
         return {
             "id": task.id,
+            "tracker_type": self.config.tracker.type,
             "title": task.title,
             "description": task.description,
             "status": task.status,
@@ -127,7 +127,6 @@ class SessionManager:
                 }
                 for attachment in task.attachments
             ],
-            "downloaded_attachments": [str(path) for path in attachments],
             "metadata": task.metadata,
         }
 
@@ -150,20 +149,14 @@ class SessionManager:
             process_id=payload.get("process_id"),
             started_at=payload.get("started_at"),
             updated_at=payload.get("updated_at"),
-            completed_at=payload.get("completed_at"),
             state=payload.get("state") or payload.get("status", "stopped"),
-            resume_count=int(payload.get("resume_count", 0)),
-            last_checkpoint=payload.get("last_checkpoint"),
             provisioned_repos=list(payload.get("provisioned_repos", [])),
         )
 
     def _ensure_state_md(self, paths: SessionPaths, task: Task, resumed: bool) -> None:
         if paths.state_md.exists():
             return
-        paths.state_md.write_text(
-            self._initial_state_md(task, resumed=resumed),
-            encoding="utf-8",
-        )
+        paths.state_md.write_text(self._initial_state_md(task, resumed=resumed), encoding="utf-8")
 
     def _initial_state_md(self, task: Task, *, resumed: bool) -> str:
         return f"""# STATE
@@ -189,59 +182,25 @@ class SessionManager:
 - None.
 
 ## Next step
-- Read `TASK.md`, `STATE.md`, and refresh the current task state before proceeding.
+- Read `TASK.md` and `STATE.md` before proceeding.
 """
 
-    def _write_workspace_records(self, paths: SessionPaths, record: SessionRecord, task: Task, attachments: list[Path]) -> None:
+    def _write_workspace_records(self, paths: SessionPaths, record: SessionRecord, task: Task, *, resumed: bool) -> None:
         now = datetime.now(UTC).isoformat()
-        session_state = SessionState(
-            internal_task_id=record.internal_task_id,
-            external_task_id=record.tracker_task_id,
-            tracker_type=self.config.tracker.type,
-            workspace=paths.root,
-            state=record.state,
-            agent_name=record.agent_name,
-            config_path=record.config_path,
-            process_id=record.process_id,
-            started_at=record.started_at,
-            updated_at=record.updated_at or now,
-            completed_at=record.completed_at,
-            resume_count=record.resume_count,
-            last_checkpoint=record.last_checkpoint or "session_prepared",
-            provisioned_repos=list(record.provisioned_repos),
-        )
-        self.workspace_repo.save_session(session_state)
-        work_item = WorkItemRecord(
-            internal_task_id=record.internal_task_id,
-            external=ExternalRef(tracker_type=self.config.tracker.type, task_id=task.id),
-            title=task.title,
-            description=task.description,
-            source_status=task.status,
-            state=record.state,
-            comments_count=len(task.comments),
-            attachments=[
-                LocalAttachment(
-                    id=attachment.id,
-                    name=attachment.name,
-                    source_url=attachment.url,
-                    local_path=self._attachment_local_path(paths, attachment.name, attachments),
-                )
-                for attachment in task.attachments
-            ],
-            metadata={"tracker_payload": task.metadata},
-            created_at=record.started_at,
-            updated_at=now,
-        )
-        self.workspace_repo.save_task(paths.root, work_item)
-        self.workspace_repo.save_tracker_meta(
-            paths.root,
-            TrackerMetaRecord(
+        self.workspace_repo.save_session(
+            SessionState(
+                internal_task_id=record.internal_task_id,
+                external_task_id=record.tracker_task_id,
                 tracker_type=self.config.tracker.type,
-                external_task_id=task.id,
-                source_status=task.status,
-                last_sync_at=now,
-                capabilities={"comments": True, "status_update": True, "attachments": True},
-            ),
+                workspace=paths.root,
+                state=record.state,
+                agent_name=record.agent_name,
+                config_path=record.config_path,
+                process_id=record.process_id,
+                started_at=record.started_at,
+                updated_at=record.updated_at or now,
+                provisioned_repos=list(record.provisioned_repos),
+            )
         )
         for comment in task.comments:
             self.workspace_repo.append_message(
@@ -257,27 +216,23 @@ class SessionManager:
                     external_message_id=comment.id or None,
                 ),
             )
+
+    def _record_agent_ready(self, paths: SessionPaths, task: Task, attachments: list[Path], *, resumed: bool) -> None:
+        now = datetime.now(UTC).isoformat()
         self.workspace_repo.append_event(
             paths.root,
             EventRecord(
                 id=f"evt-{uuid.uuid4().hex}",
-                type="session_prepared",
+                type="agent_ready",
                 created_at=now,
                 data={
                     "external_task_id": task.id,
                     "tracker_type": self.config.tracker.type,
                     "workspace": str(paths.root),
-                    "resumed": record.resume_count > 0,
-                    "attachments_downloaded": [str(path) for path in attachments],
+                    "resumed": resumed,
                 },
             ),
         )
-
-    def _attachment_local_path(self, paths: SessionPaths, name: str, attachments: list[Path]) -> str | None:
-        for path in attachments:
-            if path.name == name:
-                return str(path.relative_to(paths.root))
-        return None
 
     def provision_repo(self, paths: SessionPaths, project: ProjectSpec, branch_name: str | None = None) -> Path:
         return self.repo_seed_manager.provision(paths=paths, project=project, branch_name=branch_name)

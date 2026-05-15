@@ -267,26 +267,23 @@ session:
     assert tracker.comments["1"][-1].startswith("Task completed")
     assert (session_root / "AGENTS.md").exists()
     assert (session_root / "TASK.md").exists()
+    assert (session_root / "task.json").exists()
     assert (session_root / "STATE.md").exists()
     assert (session_root / "projects.json").exists()
     assert (session_root / ".mcp" / "config.json").exists()
-    assert (session_root / "task.json").exists()
-    assert (session_root / "tracker.json").exists()
     assert (session_root / "messages.jsonl").exists()
     assert (session_root / "events.jsonl").exists()
 
     session_payload = json.loads((session_root / "session.json").read_text(encoding="utf-8"))
     assert session_payload["external_task_id"] == "1"
     assert session_payload["tracker_type"] == "memory"
-    assert session_payload["last_checkpoint"] == "session_finished"
+    assert session_payload["state"] == "stopped"
 
     task_payload = json.loads((session_root / "task.json").read_text(encoding="utf-8"))
-    assert task_payload["external"]["task_id"] == "1"
+    assert task_payload["id"] == "1"
+    assert task_payload["tracker_type"] == "memory"
     assert task_payload["title"] == "Demo"
-
-    tracker_payload = json.loads((session_root / "tracker.json").read_text(encoding="utf-8"))
-    assert tracker_payload["external_task_id"] == "1"
-    assert tracker_payload["tracker_type"] == "memory"
+    assert task_payload["status"] == "processing"
 
     message_lines = [json.loads(line) for line in (session_root / "messages.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     assert any(item["direction"] == "outbound" and item["body"].startswith("Starting development") for item in message_lines)
@@ -294,7 +291,7 @@ session:
 
     event_lines = [json.loads(line) for line in (session_root / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     event_types = {item["type"] for item in event_lines}
-    assert {"session_prepared", "agent_started", "agent_finished", "session_finished"}.issubset(event_types)
+    assert {"agent_ready", "agent_started", "agent_stopped"}.issubset(event_types)
 
 
 def test_service_cancellation_terminates_agent_process(tmp_path: Path) -> None:
@@ -1146,8 +1143,8 @@ def test_codex_adapter_does_not_force_workspace_write_sandbox(tmp_path: Path) ->
     )
 
     command = captured["command"]
-    assert command[:4] == ["codex", "exec", "--full-auto", "-m"]
-    assert "--full-auto" in command
+    assert command[:5] == ["codex", "exec", "--sandbox", "danger-full-access", "-m"]
+    assert "--sandbox" in command
     assert "workspace-write" not in command
     assert "--skip-git-repo-check" in command
     assert "--yolo" not in command
@@ -1299,6 +1296,7 @@ def test_repo_seed_manager_writes_repo_metadata(tmp_path: Path) -> None:
         root=tmp_path / "session",
         agents_md=tmp_path / "session" / "AGENTS.md",
         task_md=tmp_path / "session" / "TASK.md",
+        task_json=tmp_path / "session" / "task.json",
         state_md=tmp_path / "session" / "STATE.md",
         projects_json=tmp_path / "session" / "projects.json",
         repos_dir=tmp_path / "session" / "repos",
@@ -1416,6 +1414,7 @@ def test_session_cleanup_removes_provisioned_worktrees_before_workspace(tmp_path
         root=tmp_path / "session",
         agents_md=tmp_path / "session" / "AGENTS.md",
         task_md=tmp_path / "session" / "TASK.md",
+        task_json=tmp_path / "session" / "task.json",
         state_md=tmp_path / "session" / "STATE.md",
         projects_json=tmp_path / "session" / "projects.json",
         repos_dir=tmp_path / "session" / "repos",

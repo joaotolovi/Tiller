@@ -57,6 +57,7 @@ def session_paths(context: SessionContext) -> SessionPaths:
         root=root,
         agents_md=root / "AGENTS.md",
         task_md=root / "TASK.md",
+        task_json=root / "task.json",
         state_md=root / "STATE.md",
         projects_json=root / "projects.json",
         repos_dir=root / "repos",

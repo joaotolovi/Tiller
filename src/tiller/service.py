@@ -105,7 +105,6 @@ class TillerService:
         record.process_id = spawn_result.process_id
         record.state = "running"
         record.updated_at = self.runtime.now()
-        record.last_checkpoint = "agent_started"
         self.runtime.mark_agent_started(
             record=record,
             workspace=paths.root,
@@ -141,8 +140,6 @@ class TillerService:
             exit_code=exit_code,
         )
         record.updated_at = self.runtime.now()
-        record.completed_at = record.updated_at
-        record.last_checkpoint = "session_finished"
         logger.info("Agent finished task_id=%s internal_task_id=%s exit_code=%s", task_id, record.internal_task_id, exit_code)
 
         self.session_manager.cleanup(paths)

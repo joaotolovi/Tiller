@@ -60,9 +60,6 @@ class TaskRuntime:
                 process_id=process_id,
                 started_at=record.started_at,
                 updated_at=now,
-                completed_at=record.completed_at,
-                resume_count=record.resume_count,
-                last_checkpoint="agent_started",
                 provisioned_repos=list(record.provisioned_repos),
             )
         )
@@ -78,22 +75,19 @@ class TaskRuntime:
 
     async def finalize_session(self, *, task: Task, record: SessionRecord, workspace: Path, exit_code: int) -> str:
         now = self._now()
-        status = "stopped"
+        state = "stopped"
         self.session_manager.workspace_repo.save_session(
             SessionState(
                 internal_task_id=record.internal_task_id,
                 external_task_id=record.tracker_task_id,
                 tracker_type=self.config.tracker.type,
                 workspace=workspace,
-                state=status,
+                state=state,
                 agent_name=record.agent_name,
                 config_path=record.config_path,
-                process_id=record.process_id,
+                process_id=None,
                 started_at=record.started_at,
                 updated_at=now,
-                completed_at=now,
-                resume_count=record.resume_count,
-                last_checkpoint="session_finished",
                 provisioned_repos=list(record.provisioned_repos),
             )
         )
@@ -101,9 +95,9 @@ class TaskRuntime:
             workspace,
             EventRecord(
                 id=f"evt-{uuid.uuid4().hex}",
-                type="agent_finished",
+                type="agent_stopped",
                 created_at=now,
-                data={"task_id": task.id, "exit_code": exit_code, "status": status},
+                data={"task_id": task.id, "exit_code": exit_code, "state": state},
             ),
         )
         final_comment = (
@@ -112,16 +106,7 @@ class TaskRuntime:
             else f"Task finished with an agent failure (exit code {exit_code}). Check the session logs at `{workspace}`."
         )
         await self.publish_comment(task=task, text=final_comment, workspace=workspace)
-        self.session_manager.workspace_repo.append_event(
-            workspace,
-            EventRecord(
-                id=f"evt-{uuid.uuid4().hex}",
-                type="session_finished",
-                created_at=self._now(),
-                data={"task_id": task.id, "status": status, "workspace": str(workspace)},
-            ),
-        )
-        return status
+        return state
 
     def now(self) -> str:
         return self._now()

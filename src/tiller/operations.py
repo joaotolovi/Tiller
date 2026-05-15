@@ -207,6 +207,7 @@ class SessionOperations:
             "root": str(paths.root),
             "agents_md": str(paths.agents_md),
             "task_md": str(paths.task_md),
+            "task_json": str(paths.task_json),
             "state_md": str(paths.state_md),
             "projects_json": str(paths.projects_json),
             "repos_dir": str(paths.repos_dir),
