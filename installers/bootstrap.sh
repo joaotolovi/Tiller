@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 REPO_OWNER="joaotolovi"
 REPO_NAME="Tiller"
@@ -16,6 +16,7 @@ require_command() {
 main() {
   require_command curl
   require_command tar
+  require_command bash
 
   tmp_dir="$(mktemp -d)"
   trap 'rm -rf "$tmp_dir"' EXIT
@@ -35,7 +36,7 @@ main() {
     exit 1
   }
 
-  exec sh "$source_dir/installers/install.sh" "$@"
+  exec bash "$source_dir/installers/install.sh" "$@"
 }
 
 main "$@"

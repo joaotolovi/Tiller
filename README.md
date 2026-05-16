@@ -86,6 +86,8 @@ Install Tiller with the platform bootstrap script.
 
 ### Linux / macOS
 
+The bootstrap script is POSIX `sh` compatible, so this command works on systems where `sh` is not Bash.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/joaotolovi/Tiller/master/installers/bootstrap.sh | sh
 ```
