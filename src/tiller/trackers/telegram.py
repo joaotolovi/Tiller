@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from ..models import Task, TaskAttachment, TaskComment
+from ..models import Task, TaskAttachment, TaskComment, TaskControlRequest
 from .base import TrackerAdapter
 from .sync_base import SyncTrackerAdapter
 
@@ -21,6 +21,7 @@ class TelegramTrackerState:
     last_update_id: int
     awaiting_new_task_by_chat: dict[str, bool]
     active_task_by_chat: dict[str, str]
+    control_requests: list[dict[str, Any]]
     tasks: dict[str, dict[str, Any]]
 
     def to_payload(self) -> dict[str, Any]:
@@ -29,6 +30,7 @@ class TelegramTrackerState:
             "last_update_id": self.last_update_id,
             "awaiting_new_task_by_chat": self.awaiting_new_task_by_chat,
             "active_task_by_chat": self.active_task_by_chat,
+            "control_requests": self.control_requests,
             "tasks": self.tasks,
         }
 
@@ -39,6 +41,7 @@ class TelegramTrackerState:
             last_update_id=0,
             awaiting_new_task_by_chat={},
             active_task_by_chat={},
+            control_requests=[],
             tasks={},
         )
 
@@ -49,6 +52,7 @@ class TelegramTrackerState:
             last_update_id=int(payload.get("last_update_id", 0)),
             awaiting_new_task_by_chat={str(k): bool(v) for k, v in dict(payload.get("awaiting_new_task_by_chat", {})).items()},
             active_task_by_chat={str(k): str(v) for k, v in dict(payload.get("active_task_by_chat", {})).items()},
+            control_requests=[item for item in list(payload.get("control_requests", [])) if isinstance(item, dict)],
             tasks={str(k): v for k, v in dict(payload.get("tasks", {})).items()},
         )
 
@@ -71,6 +75,8 @@ class TelegramStateStore:
 TELEGRAM_BOT_COMMANDS: tuple[dict[str, str], ...] = (
     {"command": "start", "description": "Show bot instructions"},
     {"command": "new", "description": "Create a new task"},
+    {"command": "stop", "description": "Stop the current task agent"},
+    {"command": "continue", "description": "Continue the current task agent"},
 )
 
 
@@ -110,6 +116,35 @@ class TelegramTrackerAdapter(TrackerAdapter):
             tasks.append(self._task_from_payload(task_id, payload))
         tasks.sort(key=lambda item: item.metadata.get("created_at", ""))
         return tasks
+
+    async def poll_control_requests(self) -> list[TaskControlRequest]:
+        state = await self._sync_updates()
+        requests: list[TaskControlRequest] = []
+        for item in state.control_requests:
+            task_id = str(item.get("task_id") or "").strip()
+            action = str(item.get("action") or "").strip()
+            source = str(item.get("source") or "telegram").strip()
+            if not task_id or action not in {"stop", "continue"}:
+                continue
+            requests.append(
+                TaskControlRequest(
+                    task_id=task_id,
+                    action=action,
+                    source=source,
+                    created_at=item.get("created_at"),
+                    author=item.get("author"),
+                    message_id=str(item.get("message_id") or "") or None,
+                    text=item.get("text"),
+                )
+            )
+        return requests
+
+    async def acknowledge_control_request(self, request: TaskControlRequest) -> None:
+        state = self.store.load()
+        state.control_requests = [
+            item for item in state.control_requests if str(item.get("message_id") or "") != str(request.message_id or "")
+        ]
+        self.store.save(state)
 
     async def get_task(self, task_id: str) -> Task:
         state = self.store.load()
@@ -233,13 +268,17 @@ class TelegramTrackerAdapter(TrackerAdapter):
             return
 
         text = str(message.get("text") or message.get("caption") or "").strip()
-        if text == "/new":
+        command = self._normalize_command(text)
+        if command == "/new":
             state.awaiting_new_task_by_chat[chat_id] = True
             state.active_task_by_chat.pop(chat_id, None)
             self._send_system_message(chat_id, "What do you need?")
             return
-        if text == "/start":
+        if command == "/start":
             self._send_system_message(chat_id, "Tiller is your programmer. Use /new to start a new task.")
+            return
+        if command in {"/stop", "/continue"}:
+            self._queue_control_request(state, message=message, chat_id=chat_id, action=command.removeprefix("/"))
             return
         if text.startswith("/"):
             return
@@ -328,6 +367,32 @@ class TelegramTrackerAdapter(TrackerAdapter):
         previous_created_at = str(previous.get("created_at") or "").strip()
         current_created_at = str(current.get("created_at") or "").strip()
         return bool(previous_created_at and previous_created_at == current_created_at)
+
+    def _normalize_command(self, text: str) -> str | None:
+        normalized = text.strip()
+        if not normalized.startswith("/"):
+            return None
+        command_token = normalized.split(None, 1)[0]
+        command_name = command_token.split("@", 1)[0]
+        return command_name.lower()
+
+    def _queue_control_request(self, state: TelegramTrackerState, *, message: dict[str, Any], chat_id: str, action: str) -> None:
+        task_id = state.active_task_by_chat.get(chat_id)
+        if not task_id:
+            self._send_system_message(chat_id, "No active task found for this chat.")
+            return
+        user = message.get("from") or {}
+        state.control_requests.append(
+            {
+                "task_id": task_id,
+                "action": action,
+                "source": "telegram_command",
+                "created_at": self._message_timestamp(message),
+                "author": str(user.get("username") or user.get("first_name") or user.get("id") or "telegram"),
+                "message_id": str(message.get("message_id") or ""),
+                "text": str(message.get("text") or message.get("caption") or ""),
+            }
+        )
 
     def _message_attachments(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         attachments: list[dict[str, Any]] = []

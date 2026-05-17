@@ -31,7 +31,7 @@ from tiller.setup_prompts import (
     login_with_gh_cli,
 )
 from tiller.github import GitHubClient, PullRequestRef, GitHubAccessibleRepo
-from tiller.models import AgentRunRequest, DiscoveredAgent, GitHubConfig, ProjectSpec, SessionPaths, Task, TaskComment
+from tiller.models import AgentRunRequest, DiscoveredAgent, GitHubConfig, ProjectSpec, SessionPaths, Task, TaskComment, TaskControlRequest
 from tiller.runtime import serialize_task
 from tiller.pr_providers import GitHubPullRequestProvider, get_pull_request_provider
 from tiller.service import TillerService, MultiTrackerService, TrackerService
@@ -778,18 +778,19 @@ session:
         [Task(id="1", title="Demo", description="Body", status="in_development")]
     )
     harness = AgentHarness({"stub": StubAdapter()})
-    service = TillerService(config=config, tracker=tracker, harness=harness)
+    service = TillerService(config=config, tracker_config=config.tracker, tracker=tracker, harness=harness)
 
     async def run_test() -> None:
         await service.run_once()
-        active = service.active_sessions["1"]
+        task_ref = service._task_ref("1")
+        active = service.active_sessions[task_ref]
         await active
 
     asyncio.run(run_test())
 
     session_root = config.session.base_path / service.session_manager.make_internal_task_id(tracker._tasks["1"])
     assert tracker._tasks["1"].status == "processing"
-    assert tracker.comments["1"][0].startswith("Starting development")
+    assert tracker.comments["1"][0].startswith("Starting task. Analyzing")
     assert tracker.comments["1"][-1].startswith("Task completed")
     assert (session_root / "AGENTS.md").exists()
     assert (session_root / "TASK.md").exists()
@@ -813,12 +814,76 @@ session:
     assert task_payload["status"] == "processing"
 
     message_lines = [json.loads(line) for line in (session_root / "messages.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert any(item["direction"] == "outbound" and item["body"].startswith("Starting development") for item in message_lines)
+    assert any(item["direction"] == "outbound" and item["body"].startswith("Starting task. Analyzing") for item in message_lines)
     assert any(item["direction"] == "outbound" and item["body"].startswith("Task completed") for item in message_lines)
 
     event_lines = [json.loads(line) for line in (session_root / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     event_types = {item["type"] for item in event_lines}
     assert {"agent_ready", "agent_started", "agent_stopped"}.issubset(event_types)
+
+
+def test_service_comments_error_when_agent_spawn_fails(tmp_path: Path) -> None:
+    config_path = tmp_path / "tiller.yaml"
+    config_path.write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+  poll_interval: 30
+  processing_status: processing
+agent:
+  default: stub
+projects:
+  repo:
+    url: https://github.com/org/repo
+session:
+  base_path: %s
+  keep_finished_sessions: true
+""" % tmp_path.as_posix(),
+        encoding="utf-8",
+    )
+
+    class FailingStubAdapter(CLIAdapter):
+        def __init__(self) -> None:
+            super().__init__("stub", "python")
+
+        def is_available(self) -> bool:
+            return True
+
+        def spawn(self, request):
+            raise RuntimeError("failed to initialize agent cli")
+
+    config = load_config(config_path)
+    tracker = InMemoryTrackerAdapter(
+        [Task(id="1", title="Demo", description="Body", status="in_development")]
+    )
+    harness = AgentHarness({"stub": FailingStubAdapter()})
+    service = TillerService(config=config, tracker_config=config.tracker, tracker=tracker, harness=harness)
+
+    async def run_test() -> None:
+        await service.run_once()
+        task_ref = service._task_ref("1")
+        active = service.active_sessions[task_ref]
+        with pytest.raises(RuntimeError, match="failed to initialize agent cli"):
+            await active
+
+    asyncio.run(run_test())
+
+    session_root = config.session.base_path / service.session_manager.make_internal_task_id(tracker._tasks["1"])
+    assert tracker._tasks["1"].status == "processing"
+    assert tracker.comments["1"][0].startswith("Starting task. Analyzing")
+    assert tracker.comments["1"][-1].startswith("Task failed before completion")
+    assert "failed to initialize agent cli" in tracker.comments["1"][-1]
+
+    session_payload = json.loads((session_root / "session.json").read_text(encoding="utf-8"))
+    assert session_payload["state"] == "failed"
+    assert session_payload["process_id"] is None
+
+    message_lines = [json.loads(line) for line in (session_root / "messages.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(item["direction"] == "outbound" and item["body"].startswith("Task failed before completion") for item in message_lines)
+
+    event_lines = [json.loads(line) for line in (session_root / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(item["type"] == "session_failed" for item in event_lines)
 
 
 def test_service_cancellation_terminates_agent_process(tmp_path: Path) -> None:
@@ -873,13 +938,14 @@ session:
         [Task(id="1", title="Demo", description="Body", status="in_development")]
     )
     harness = AgentHarness({"stub": LongRunningStubAdapter()})
-    service = TillerService(config=config, tracker=tracker, harness=harness)
+    service = TillerService(config=config, tracker_config=config.tracker, tracker=tracker, harness=harness)
 
     async def run_test() -> None:
         await service.run_once()
-        active = service.active_sessions["1"]
+        task_ref = service._task_ref("1")
+        active = service.active_sessions[task_ref]
         await asyncio.sleep(0.2)
-        process = service._active_processes["1"]
+        process = service._active_processes[task_ref]
         assert process.poll() is None
         active.cancel()
         try:
@@ -888,7 +954,91 @@ session:
             pass
         await asyncio.sleep(0.2)
         assert process.poll() is not None
-        assert "1" not in service._active_processes
+        assert task_ref not in service._active_processes
+
+    asyncio.run(run_test())
+
+
+def test_service_stop_and_continue_control_requests(tmp_path: Path) -> None:
+    config_path = tmp_path / "tiller.yaml"
+    config_path.write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+  poll_interval: 30
+  processing_status: processing
+agent:
+  default: stub
+projects:
+  repo:
+    url: https://github.com/org/repo
+session:
+  base_path: %s
+  keep_finished_sessions: true
+""" % tmp_path.as_posix(),
+        encoding="utf-8",
+    )
+
+    class ControllableTracker(InMemoryTrackerAdapter):
+        def __init__(self, tasks: list[Task]) -> None:
+            super().__init__(tasks)
+            self.requests: list[TaskControlRequest] = []
+
+        async def poll_control_requests(self) -> list[TaskControlRequest]:
+            pending = list(self.requests)
+            self.requests = []
+            return pending
+
+    class LongRunningStubAdapter(CLIAdapter):
+        def __init__(self) -> None:
+            super().__init__("stub", "python")
+
+        def is_available(self) -> bool:
+            return True
+
+        def spawn(self, request):
+            runtime_dir = request.workspace / ".tiller"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            log_path = runtime_dir / "stub.log"
+            process = __import__("subprocess").Popen(
+                ["python", "-c", "import time; time.sleep(2)"],
+                cwd=request.workspace,
+                stdout=log_path.open("wb"),
+                stderr=__import__("subprocess").STDOUT,
+                start_new_session=True,
+            )
+            return SpawnResult(
+                adapter_name=self.name,
+                command=["python", "-c", "import time; time.sleep(2)"],
+                process_id=process.pid,
+                log_path=log_path,
+                process=process,
+            )
+
+    config = load_config(config_path)
+    tracker = ControllableTracker([Task(id="1", title="Demo", description="Body", status="in_development")])
+    harness = AgentHarness({"stub": LongRunningStubAdapter()})
+    service = TillerService(config=config, tracker_config=config.tracker, tracker=tracker, harness=harness)
+
+    async def run_test() -> None:
+        await service.run_once()
+        task_ref = service._task_ref("1")
+        await asyncio.sleep(0.2)
+        tracker.requests.append(TaskControlRequest(task_id="1", action="stop", source="test"))
+        await service.run_once()
+        session_root = config.session.base_path / service.session_manager.make_internal_task_id(tracker._tasks["1"])
+        payload = json.loads((session_root / "session.json").read_text(encoding="utf-8"))
+        assert payload["state"] == "stopped"
+        assert any("Agent stopped" in item for item in tracker.comments["1"])
+
+        tracker.requests.append(TaskControlRequest(task_id="1", action="continue", source="test"))
+        await service.run_once()
+        active = service.active_sessions[task_ref]
+        await active
+        payload = json.loads((session_root / "session.json").read_text(encoding="utf-8"))
+        assert payload["state"] == "completed"
+        assert any("Continue requested" in item for item in tracker.comments["1"])
 
     asyncio.run(run_test())
 
@@ -917,7 +1067,7 @@ session:
     tracker = InMemoryTrackerAdapter(
         [Task(id="1", title="Demo", description="Body", status="in_development")]
     )
-    service = TillerService(config=config, tracker=tracker, harness=AgentHarness({"stub": StubAdapter()}))
+    service = TillerService(config=config, tracker_config=config.tracker, tracker=tracker, harness=AgentHarness({"stub": StubAdapter()}))
     manager = service.session_manager
     task = tracker._tasks["1"]
 
@@ -1382,6 +1532,8 @@ def test_telegram_tracker_creates_task_comments_and_rotates_on_new(tmp_path: Pat
             "commands": [
                 {"command": "start", "description": "Show bot instructions"},
                 {"command": "new", "description": "Create a new task"},
+                {"command": "stop", "description": "Stop the current task agent"},
+                {"command": "continue", "description": "Continue the current task agent"},
             ]
         }
     ]
@@ -1403,6 +1555,155 @@ def test_telegram_tracker_creates_task_comments_and_rotates_on_new(tmp_path: Pat
     updated = asyncio.run(adapter.get_task("telegram-1"))
     assert updated.comments[-1].body == "andamento"
     assert adapter._client.sent_messages[-1] == {"chat_id": "100", "text": "andamento"}
+
+
+def test_telegram_tracker_emits_stop_and_continue_control_requests(tmp_path: Path) -> None:
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, updates: list[dict[str, object]]) -> None:
+            self.updates = updates
+            self.base_url = "https://api.telegram.org/bottoken"
+
+        async def get(self, path: str, params=None):
+            if path == "/getUpdates":
+                result = self.updates
+                self.updates = []
+                return FakeResponse({"ok": True, "result": result})
+            if path == "/getMe":
+                return FakeResponse({"ok": True, "result": {"id": 1}})
+            raise AssertionError(f"unexpected path: {path}")
+
+        async def post(self, path: str, json=None):
+            return FakeResponse({"ok": True, "result": True})
+
+        async def aclose(self) -> None:
+            return None
+
+    state_path = tmp_path / "telegram-control-state.json"
+    adapter = TelegramTrackerAdapter(bot_token="token", state_path=state_path, allowed_chat_ids=["100"], allowed_user_ids=["7"])
+    adapter._client = FakeAsyncClient(
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 10,
+                    "date": 1715640000,
+                    "text": "primeira task",
+                    "chat": {"id": 100},
+                    "from": {"id": 7, "username": "joao"},
+                },
+            },
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 11,
+                    "date": 1715640001,
+                    "text": "/stop@demo_bot",
+                    "chat": {"id": 100},
+                    "from": {"id": 7, "username": "joao"},
+                },
+            },
+            {
+                "update_id": 3,
+                "message": {
+                    "message_id": 12,
+                    "date": 1715640002,
+                    "text": "/continue",
+                    "chat": {"id": 100},
+                    "from": {"id": 7, "username": "joao"},
+                },
+            },
+        ]
+    )  # type: ignore[assignment]
+
+    tasks = asyncio.run(adapter.list_tasks("new"))
+    requests = asyncio.run(adapter.poll_control_requests())
+
+    assert [task.id for task in tasks] == ["telegram-1"]
+    assert [(item.task_id, item.action) for item in requests] == [("telegram-1", "stop"), ("telegram-1", "continue")]
+
+    for item in requests:
+        asyncio.run(adapter.acknowledge_control_request(item))
+
+    assert asyncio.run(adapter.poll_control_requests()) == []
+
+
+def test_clickup_tracker_polls_stop_and_continue_comments_once(monkeypatch) -> None:
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def get(self, path: str, params=None):
+            if path == "/team/team-1/task":
+                return FakeResponse(
+                    {
+                        "tasks": [
+                            {
+                                "id": "task-1",
+                                "name": "Demo",
+                                "markdown_description": "Body",
+                                "status": {"status": "in_development"},
+                                "attachments": [],
+                            }
+                        ]
+                    }
+                )
+            if path == "/task/task-1/comment":
+                return FakeResponse(
+                    {
+                        "comments": [
+                            {"id": "c-stop", "comment_text": "/stop", "user": {"username": "human"}, "date": 1710000000},
+                            {"id": "c-continue", "comment_text": "/continue", "user": {"username": "human"}, "date": 1710000001},
+                        ]
+                    }
+                )
+            if path == "/task/task-1":
+                return FakeResponse(
+                    {
+                        "id": "task-1",
+                        "name": "Demo",
+                        "markdown_description": "Body",
+                        "status": {"status": "in_development"},
+                        "attachments": [],
+                    }
+                )
+            raise AssertionError(f"unexpected path: {path}")
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr("tiller.trackers.clickup.httpx.AsyncClient", FakeAsyncClient)
+    adapter = ClickUpTrackerAdapter(token="token", team_id="team-1")
+
+    requests = asyncio.run(adapter.poll_control_requests())
+    assert [(item.task_id, item.action, item.message_id) for item in requests] == [
+        ("task-1", "stop", "c-stop"),
+        ("task-1", "continue", "c-continue"),
+    ]
+
+    for item in requests:
+        asyncio.run(adapter.acknowledge_control_request(item))
+
+    assert asyncio.run(adapter.poll_control_requests()) == []
 
 
 def test_telegram_tracker_merges_fragmented_long_messages_into_single_comment(tmp_path: Path) -> None:

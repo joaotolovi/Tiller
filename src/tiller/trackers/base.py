@@ -4,7 +4,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from ..models import Task
+from ..models import Task, TaskControlRequest
 
 
 class TrackerAdapter(ABC):
@@ -31,6 +31,12 @@ class TrackerAdapter(ABC):
     @abstractmethod
     async def download_attachments(self, task_id: str, dest: Path) -> list[Path]:
         raise NotImplementedError
+
+    async def poll_control_requests(self) -> list[TaskControlRequest]:
+        return []
+
+    async def acknowledge_control_request(self, request: TaskControlRequest) -> None:
+        return None
 
     async def validate(self) -> None:
         return None
@@ -64,6 +70,13 @@ class InMemoryTrackerAdapter(TrackerAdapter):
     async def add_comment(self, task_id: str, text: str) -> None:
         await asyncio.sleep(0)
         self.comments.setdefault(task_id, []).append(text)
+
+    async def poll_control_requests(self) -> list[TaskControlRequest]:
+        await asyncio.sleep(0)
+        return []
+
+    async def acknowledge_control_request(self, request: TaskControlRequest) -> None:
+        await asyncio.sleep(0)
 
     async def download_attachments(self, task_id: str, dest: Path) -> list[Path]:
         await asyncio.sleep(0)

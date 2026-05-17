@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,20 +51,7 @@ class TaskRuntime:
     def mark_agent_started(self, *, record: SessionRecord, workspace: Path, process_id: int, adapter_name: str) -> None:
         now = self._now()
         self.session_manager.workspace_repo.save_session(
-            SessionState(
-                internal_task_id=record.internal_task_id,
-                tracker_name=record.tracker_name,
-                tracker_task_id=record.tracker_task_id,
-                tracker_type=record.tracker_type,
-                workspace=workspace,
-                state="running",
-                agent_name=record.agent_name,
-                config_path=record.config_path,
-                process_id=process_id,
-                started_at=record.started_at,
-                updated_at=now,
-                provisioned_repos=list(record.provisioned_repos),
-            )
+            self.session_state(record=record, workspace=workspace, state="running", process_id=process_id, updated_at=now)
         )
         self.session_manager.workspace_repo.append_event(
             workspace,
@@ -84,20 +72,7 @@ class TaskRuntime:
         now = self._now()
         state = "completed" if exit_code == 0 else "failed"
         self.session_manager.workspace_repo.save_session(
-            SessionState(
-                internal_task_id=record.internal_task_id,
-                tracker_name=record.tracker_name,
-                tracker_task_id=record.tracker_task_id,
-                tracker_type=record.tracker_type,
-                workspace=workspace,
-                state=state,
-                agent_name=record.agent_name,
-                config_path=record.config_path,
-                process_id=None,
-                started_at=record.started_at,
-                updated_at=now,
-                provisioned_repos=list(record.provisioned_repos),
-            )
+            self.session_state(record=record, workspace=workspace, state=state, process_id=None, updated_at=now)
         )
         self.session_manager.workspace_repo.append_event(
             workspace,
@@ -120,6 +95,83 @@ class TaskRuntime:
         )
         await self.publish_comment(task=task, text=final_comment, workspace=workspace)
         return state
+
+    async def fail_session(self, *, task: Task, error: BaseException, record: SessionRecord | None = None, workspace: Path | None = None) -> None:
+        now = self._now()
+        detail = str(error).strip() or error.__class__.__name__
+        final_comment = (
+            "Task failed before completion. "
+            f"Error: {error.__class__.__name__}: {detail}."
+        )
+        if workspace is not None:
+            final_comment += f" Check the session logs at `{workspace}`."
+        await self.publish_comment(task=task, text=final_comment, workspace=workspace)
+        if record is None or workspace is None:
+            return
+        self.session_manager.workspace_repo.save_session(
+            self.session_state(record=record, workspace=workspace, state="failed", process_id=None, updated_at=now)
+        )
+        self.session_manager.workspace_repo.append_event(
+            workspace,
+            EventRecord(
+                id=f"evt-{uuid.uuid4().hex}",
+                type="session_failed",
+                created_at=now,
+                data={
+                    "tracker_name": record.tracker_name,
+                    "task_id": task.id,
+                    "error_type": error.__class__.__name__,
+                    "error": detail,
+                    "traceback": "".join(traceback.format_exception(type(error), error, error.__traceback__)),
+                },
+            ),
+        )
+
+    async def mark_session_stopped(self, *, task: Task, tracker_name: str, reason: str) -> None:
+        workspace = self._workspace_for_task(task)
+        state = self.session_manager.workspace_repo.load_session(workspace)
+        if state is None:
+            await self.publish_comment(task=task, text=reason, workspace=workspace)
+            return
+        now = self._now()
+        state.state = "stopped"
+        state.process_id = None
+        state.updated_at = now
+        self.session_manager.workspace_repo.save_session(state)
+        self.session_manager.workspace_repo.append_event(
+            workspace,
+            EventRecord(
+                id=f"evt-{uuid.uuid4().hex}",
+                type="session_stopped",
+                created_at=now,
+                data={"tracker_name": tracker_name, "task_id": task.id, "reason": reason},
+            ),
+        )
+        await self.publish_comment(task=task, text=f"Agent stopped. {reason}", workspace=workspace)
+
+    def session_state(
+        self,
+        *,
+        record: SessionRecord,
+        workspace: Path,
+        state: str,
+        process_id: int | None,
+        updated_at: str | None = None,
+    ) -> SessionState:
+        return SessionState(
+            internal_task_id=record.internal_task_id,
+            tracker_name=record.tracker_name,
+            tracker_task_id=record.tracker_task_id,
+            tracker_type=record.tracker_type,
+            workspace=workspace,
+            state=state,
+            agent_name=record.agent_name,
+            config_path=record.config_path,
+            process_id=process_id,
+            started_at=record.started_at,
+            updated_at=updated_at or self._now(),
+            provisioned_repos=list(record.provisioned_repos),
+        )
 
     def now(self) -> str:
         return self._now()

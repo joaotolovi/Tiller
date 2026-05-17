@@ -32,6 +32,17 @@ class Task:
 
 
 @dataclass(slots=True)
+class TaskControlRequest:
+    task_id: str
+    action: str
+    source: str
+    created_at: str | None = None
+    author: str | None = None
+    message_id: str | None = None
+    text: str | None = None
+
+
+@dataclass(slots=True)
 class ProjectSpec:
     name: str
     url: str

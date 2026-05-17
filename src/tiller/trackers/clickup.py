@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from ..models import Task, TaskAttachment, TaskComment
+from ..models import Task, TaskAttachment, TaskComment, TaskControlRequest
 from .base import TrackerAdapter
 
 
@@ -30,6 +30,7 @@ class ClickUpTrackerAdapter(TrackerAdapter):
             headers={"Authorization": token, "Content-Type": "application/json"},
             timeout=30.0,
         )
+        self._seen_control_request_ids: set[str] = set()
 
     async def validate(self) -> None:
         response = await self._client.get(f"/team/{self.team_id}")
@@ -119,6 +120,36 @@ class ClickUpTrackerAdapter(TrackerAdapter):
         task = self._task_from_clickup(task_payload, include_comments=False)
         task.comments = [self._comment_from_clickup(comment) for comment in comments_payload.get("comments", [])]
         return task
+
+    async def poll_control_requests(self) -> list[TaskControlRequest]:
+        tasks = await self.list_tasks(self._any_status_for_control_poll())
+        requests: list[TaskControlRequest] = []
+        for task in tasks:
+            comments_response = await self._client.get(f"/task/{task.id}/comment")
+            comments_response.raise_for_status()
+            for item in comments_response.json().get("comments", []):
+                comment = self._comment_from_clickup(item)
+                normalized = comment.body.strip().lower()
+                if normalized not in {"/stop", "/continue"}:
+                    continue
+                if comment.id in self._seen_control_request_ids:
+                    continue
+                requests.append(
+                    TaskControlRequest(
+                        task_id=task.id,
+                        action=normalized.removeprefix("/"),
+                        source="clickup_comment",
+                        created_at=comment.created_at,
+                        author=comment.author,
+                        message_id=comment.id or None,
+                        text=comment.body,
+                    )
+                )
+        return requests
+
+    async def acknowledge_control_request(self, request: TaskControlRequest) -> None:
+        if request.message_id:
+            self._seen_control_request_ids.add(request.message_id)
 
     async def list_status_options(self, task_id: str) -> list[str]:
         task = await self.get_task(task_id)
@@ -215,11 +246,12 @@ class ClickUpTrackerAdapter(TrackerAdapter):
 
     def _list_task_params(self, status: str) -> dict[str, Any]:
         params: dict[str, Any] = {
-            "statuses[]": status,
             "include_closed": str(self.include_closed).lower(),
             "subtasks": "true",
             "page": 0,
         }
+        if status != "*":
+            params["statuses[]"] = status
         if self.tag:
             params["tags[]"] = self.tag
         if self.assignee:
@@ -255,6 +287,9 @@ class ClickUpTrackerAdapter(TrackerAdapter):
             body=payload.get("comment_text") or "\n".join(part.get("text", "") for part in payload.get("comment", [])),
             created_at=str(payload.get("date")) if payload.get("date") is not None else None,
         )
+
+    def _any_status_for_control_poll(self) -> str:
+        return "*"
 
     async def aclose(self) -> None:
         await self._client.aclose()
