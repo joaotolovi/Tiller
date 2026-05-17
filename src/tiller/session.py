@@ -11,7 +11,7 @@ from typing import Any
 from .agents.common import write_native_mcp_project_files
 from .config import dump_json
 from .mcp import write_mcp_config
-from .models import ProjectSpec, SessionPaths, SessionRecord, Task, TillerConfig
+from .models import ProjectSpec, SessionPaths, SessionRecord, Task, TillerConfig, TrackerConfig
 from .pr_providers import get_pull_request_provider
 from .repo_seed import RepoSeedManager
 from .templates import render_agents_md, render_task_md
@@ -20,9 +20,10 @@ from .workspace import EventRecord, MessageRecord, SessionState, WorkspaceReposi
 
 
 class SessionManager:
-    def __init__(self, config: TillerConfig, tracker: TrackerAdapter) -> None:
+    def __init__(self, config: TillerConfig, tracker: TrackerAdapter, tracker_config: TrackerConfig | None = None) -> None:
         self.config = config
         self.tracker = tracker
+        self.tracker_config = tracker_config or config.tracker
         self.config.session.base_path.mkdir(parents=True, exist_ok=True)
         repo_store_path = self.config.session.repo_store_path or (self.config.session.base_path / "repo-mirrors")
         self.repo_seed_manager = RepoSeedManager(
@@ -33,7 +34,8 @@ class SessionManager:
         self.workspace_repo = WorkspaceRepository(self.config.session.base_path)
 
     def make_internal_task_id(self, task: Task) -> str:
-        digest = hashlib.sha1(task.id.encode("utf-8")).hexdigest()[:8]
+        digest_source = f"{self.tracker_config.name}:{task.id}"
+        digest = hashlib.sha1(digest_source.encode("utf-8")).hexdigest()[:8]
         return f"TASK-{digest.upper()}"
 
     def build_paths(self, internal_task_id: str) -> SessionPaths:
@@ -88,6 +90,8 @@ class SessionManager:
         now = datetime.now(UTC).isoformat()
         if existing_record is not None:
             record = existing_record
+            record.tracker_name = self.tracker_config.name
+            record.tracker_type = self.tracker_config.type
             record.agent_name = agent_name
             record.workspace = paths.root
             record.config_path = self.config.config_path
@@ -98,6 +102,8 @@ class SessionManager:
         else:
             record = SessionRecord(
                 internal_task_id=internal_task_id,
+                tracker_name=self.tracker_config.name,
+                tracker_type=self.tracker_config.type,
                 tracker_task_id=task.id,
                 agent_name=agent_name,
                 workspace=paths.root,
@@ -109,7 +115,7 @@ class SessionManager:
 
         dump_json(paths.state_json, record)
         self._write_workspace_records(paths, record, task, resumed=existing_record is not None)
-        self._record_agent_ready(paths, task, attachments, resumed=existing_record is not None)
+        self._record_agent_ready(paths, record, task, attachments, resumed=existing_record is not None)
         return record, paths, mcp_payload
 
     def cleanup(self, paths: SessionPaths) -> None:
@@ -133,7 +139,8 @@ class SessionManager:
     def _task_payload(self, task: Task) -> dict[str, Any]:
         return {
             "id": task.id,
-            "tracker_type": self.config.tracker.type,
+            "tracker_name": self.tracker_config.name,
+            "tracker_type": self.tracker_config.type,
             "title": task.title,
             "description": task.description,
             "status": task.status,
@@ -161,6 +168,8 @@ class SessionManager:
         payload = __import__("json").loads(paths.state_json.read_text(encoding="utf-8"))
         return SessionRecord(
             internal_task_id=payload["internal_task_id"],
+            tracker_name=payload.get("tracker_name", "default"),
+            tracker_type=payload.get("tracker_type", self.tracker_config.type),
             tracker_task_id=payload.get("tracker_task_id") or payload["external_task_id"],
             agent_name=payload["agent_name"],
             workspace=Path(payload["workspace"]),
@@ -209,8 +218,9 @@ class SessionManager:
         self.workspace_repo.save_session(
             SessionState(
                 internal_task_id=record.internal_task_id,
+                tracker_name=record.tracker_name,
                 tracker_task_id=record.tracker_task_id,
-                tracker_type=self.config.tracker.type,
+                tracker_type=record.tracker_type,
                 workspace=paths.root,
                 state=record.state,
                 agent_name=record.agent_name,
@@ -236,7 +246,15 @@ class SessionManager:
                 ),
             )
 
-    def _record_agent_ready(self, paths: SessionPaths, task: Task, attachments: list[Path], *, resumed: bool) -> None:
+    def _record_agent_ready(
+        self,
+        paths: SessionPaths,
+        record: SessionRecord,
+        task: Task,
+        attachments: list[Path],
+        *,
+        resumed: bool,
+    ) -> None:
         now = datetime.now(UTC).isoformat()
         self.workspace_repo.append_event(
             paths.root,
@@ -245,8 +263,9 @@ class SessionManager:
                 type="agent_ready",
                 created_at=now,
                 data={
+                    "tracker_name": record.tracker_name,
                     "tracker_task_id": task.id,
-                    "tracker_type": self.config.tracker.type,
+                    "tracker_type": record.tracker_type,
                     "workspace": str(paths.root),
                     "resumed": resumed,
                 },

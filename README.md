@@ -10,9 +10,9 @@
 
 **Tracker-driven harness for autonomous coding agents.**
 
-*Tiller is a simple, tracker-agnostic workflow layer that connects coding agents to real engineering workflows. It provides everything agents need to execute engineering work end-to-end — from task understanding to pull request delivery — with tracker awareness, multi-repo coordination, and persistent workflow memory that compounds over time. No heavy workflows, orchestration engines, or rigid process definitions. Just the minimum necessary structure to achieve maximum execution performance.*
+*Tiller is a simple, multi-tracker, tracker-agnostic workflow layer that connects coding agents to real engineering workflows. It provides everything agents need to execute engineering work end-to-end — from task understanding to pull request delivery — with tracker awareness, multi-repo coordination, and persistent workflow memory that compounds over time. No heavy workflows, orchestration engines, or rigid process definitions. Just the minimum necessary structure to achieve maximum execution performance.*
 
-Tiller watches your tracker, finds the work to be done, opens an isolated session, starts the selected coding-agent CLI, gives it the right context, and lets the agent work like a developer.
+Tiller watches your trackers, finds the work to be done, opens an isolated session, starts the selected coding-agent CLI, gives it the right context, and lets the agent work like a developer.
 
 Example: Move a task from ClickUp to Develop and Tiller starts Codex/Claude in a new workspace with the task's context. The agent publishes progress and reports blocks, works on the repositories needed to complete the task, and opens pull requests in all repositories worked on.
 
@@ -66,7 +66,7 @@ Planned/reserved: `trello`, `linear`, `github`, and `github-issues`.
 
 Capability | What it means
 --- | ---
-Tracker watcher | Polls the configured tracker status and starts work only when a task is ready.
+Tracker watcher | Polls configured trackers and starts work only when a task is ready.
 Isolated sessions | Creates a per-task workspace with task files, memory, attachments, config, and repo area.
 Agent CLI launcher | Starts the selected coding-agent CLI with the task goal in the session workspace.
 Project-local MCP bootstrap | Prepares MCP config files for supported agent CLIs inside the session workspace.
@@ -161,14 +161,15 @@ The setup wizard helps you choose:
 ### 2. Review `tiller.yaml`
 
 ```yaml
-tracker:
-  type: clickup
-  token: YOUR_CLICKUP_TOKEN
-  team_id: "YOUR_CLICKUP_TEAM_ID"
-  trigger_status: AIDEV
-  poll_interval: 60
-  # assignee: "CLICKUP_USER_ID"
-  # tag: backend
+trackers:
+  main:
+    type: clickup
+    token: YOUR_CLICKUP_TOKEN
+    team_id: "YOUR_CLICKUP_TEAM_ID"
+    trigger_status: AIDEV
+    poll_interval: 60
+    # assignee: "CLICKUP_USER_ID"
+    # tag: backend
 
 agent:
   default: codex
@@ -259,7 +260,7 @@ uv run tiller discover-agents --config tiller.yaml
 uv run tiller run --config tiller.yaml
 ```
 
-Tiller will keep polling the tracker. When a task reaches `trigger_status`, it creates a session and starts the configured agent.
+Tiller will keep polling the configured trackers. When a task reaches `trigger_status`, it creates a session and starts the configured agent.
 
 ---
 
@@ -334,7 +335,7 @@ If you use advanced providers such as Hindsight or LangMem, configure them under
 
 ## How it works
 
-1. Tiller polls the configured tracker for tasks in `trigger_status`.
+1. Tiller polls the configured trackers for tasks in `trigger_status`.
 2. For each ready task, it creates or resumes an isolated session.
 3. The session receives task context, attachments, project metadata, `AGENTS.md`, `TASK.md`, `task.json`, and `STATE.md`.
 4. Tiller starts the configured agent CLI in that workspace.
@@ -442,8 +443,8 @@ Problem | Check
 --- | ---
 No agent is discovered | Install one of the supported CLIs and make sure the command is in `PATH`.
 `Unknown agent adapter` | Confirm `agent.default` matches a built-in adapter or a custom adapter in `agents.json`.
-ClickUp auth fails | Verify `tracker.token`, `tracker.team_id`, and ClickUp API access.
-No tasks are picked up | Confirm the exact `trigger_status`, optional `assignee`/`tag` filters, and `poll_interval`.
+ClickUp auth fails | Verify `trackers.main.token`, `trackers.main.team_id`, and ClickUp API access.
+No tasks are picked up | Confirm the exact `trigger_status`, optional `assignee`/`tag` filters, and `poll_interval` under the tracker you configured (for example `trackers.main`).
 GitHub access is unavailable | Confirm `github.enabled`, `github.url`, and `GITHUB_API_TOKEN` or `github.token`.
 Repo provisioning fails | Verify the project URL, permissions, default branch, and local git access.
 

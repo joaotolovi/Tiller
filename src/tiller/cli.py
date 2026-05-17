@@ -13,7 +13,7 @@ from .commands import handle_session_command, register_session_subcommands
 from .config import load_config
 from .github import GitHubClient
 from .pr_providers import get_pull_request_provider
-from .service import TillerService
+from .service import MultiTrackerService, TrackerService
 from .setup import run_setup
 from .trackers import build_tracker_adapter
 
@@ -58,14 +58,19 @@ def _configure_logging(level: str) -> None:
 
 async def _validate_startup(config_path: str) -> None:
     config = load_config(config_path)
-    tracker = build_tracker_adapter(config.tracker.type, **config.tracker.options)
     logger.info("Running startup validation")
-    try:
-        await tracker.validate()
-    except httpx.HTTPError as exc:
-        logger.error("Tracker validation failed: %s", exc)
-        raise SystemExit(1)
-    logger.info("Tracker validation ok tracker=%s", config.tracker.type)
+    for tracker_config in config.trackers.values():
+        tracker = build_tracker_adapter(tracker_config.type, **tracker_config.options)
+        try:
+            await tracker.validate()
+        except httpx.HTTPError as exc:
+            logger.error("Tracker validation failed tracker_name=%s: %s", tracker_config.name, exc)
+            raise SystemExit(1)
+        logger.info(
+            "Tracker validation ok tracker_name=%s tracker_type=%s",
+            tracker_config.name,
+            tracker_config.type,
+        )
     if config.github.enabled:
         client = GitHubClient(config.github)
         try:
@@ -94,8 +99,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     asyncio.run(_validate_startup(args.config))
-    tracker = build_tracker_adapter(config.tracker.type, **config.tracker.options)
-    service = TillerService(config=config, tracker=tracker, harness=harness)
+    services = [
+        TrackerService(
+            config=config,
+            tracker_config=tracker_config,
+            tracker=build_tracker_adapter(tracker_config.type, **tracker_config.options),
+            harness=harness,
+        )
+        for tracker_config in config.trackers.values()
+    ]
+    service = MultiTrackerService(services)
     try:
         asyncio.run(service.run_forever())
     except KeyboardInterrupt:

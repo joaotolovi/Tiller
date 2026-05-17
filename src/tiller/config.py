@@ -61,11 +61,42 @@ def _merge_projects(
     return merged
 
 
+def _build_tracker_config(name: str, tracker_raw: dict[str, Any]) -> TrackerConfig:
+    return TrackerConfig(
+        name=name,
+        type=tracker_raw["type"],
+        trigger_status=tracker_raw["trigger_status"],
+        poll_interval=int(tracker_raw.get("poll_interval", 30)),
+        processing_status=tracker_raw.get("processing_status"),
+        done_status=tracker_raw.get("done_status"),
+        options={
+            k: v
+            for k, v in tracker_raw.items()
+            if k not in {"type", "trigger_status", "poll_interval", "processing_status", "done_status"}
+        },
+    )
+
+
+def _load_trackers(raw: dict[str, Any]) -> dict[str, TrackerConfig]:
+    trackers_raw = raw.get("trackers")
+    if trackers_raw:
+        return {
+            name: _build_tracker_config(name, dict(payload))
+            for name, payload in trackers_raw.items()
+        }
+
+    tracker_raw = raw.get("tracker")
+    if tracker_raw:
+        return {"default": _build_tracker_config("default", dict(tracker_raw))}
+
+    raise ValueError("Config must define 'tracker' or 'trackers'")
+
+
 def load_config(path: str | Path) -> TillerConfig:
     config_path = Path(path).expanduser().resolve()
     raw = _load_yaml(config_path.read_text(encoding="utf-8"))
 
-    tracker_raw = raw.get("tracker", {})
+    trackers = _load_trackers(raw)
     agent_raw = raw.get("agent", {})
     session_raw = raw.get("session", {})
     projects_raw = raw.get("projects", {})
@@ -101,18 +132,7 @@ def load_config(path: str | Path) -> TillerConfig:
     local_projects = discover_local_projects(session.repo_store_path)
 
     return TillerConfig(
-        tracker=TrackerConfig(
-            type=tracker_raw["type"],
-            trigger_status=tracker_raw["trigger_status"],
-            poll_interval=int(tracker_raw.get("poll_interval", 30)),
-            processing_status=tracker_raw.get("processing_status"),
-            done_status=tracker_raw.get("done_status"),
-            options={
-                k: v
-                for k, v in tracker_raw.items()
-                if k not in {"type", "trigger_status", "poll_interval", "processing_status", "done_status"}
-            },
-        ),
+        trackers=trackers,
         agent=agent,
         projects=_merge_projects(projects, local_projects),
         session=session,

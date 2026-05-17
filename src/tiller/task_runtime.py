@@ -4,21 +4,22 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .models import SessionRecord, Task, TillerConfig
+from .models import SessionRecord, Task, TillerConfig, TrackerConfig
 from .session import SessionManager
 from .trackers import TrackerAdapter
 from .workspace import EventRecord, MessageRecord, SessionState
 
 
 class TaskRuntime:
-    def __init__(self, *, config: TillerConfig, tracker: TrackerAdapter, session_manager: SessionManager) -> None:
+    def __init__(self, *, config: TillerConfig, tracker: TrackerAdapter, session_manager: SessionManager, tracker_config: TrackerConfig | None = None) -> None:
         self.config = config
         self.tracker = tracker
         self.session_manager = session_manager
+        self.tracker_config = tracker_config or config.tracker
 
     async def claim_task(self, task_id: str) -> None:
-        if self.config.tracker.processing_status:
-            await self.tracker.update_status(task_id, self.config.tracker.processing_status)
+        if self.tracker_config.processing_status:
+            await self.tracker.update_status(task_id, self.tracker_config.processing_status)
 
     async def publish_comment(self, *, task: Task, text: str, workspace: Path | None = None) -> None:
         await self.tracker.add_comment(task.id, text)
@@ -51,8 +52,9 @@ class TaskRuntime:
         self.session_manager.workspace_repo.save_session(
             SessionState(
                 internal_task_id=record.internal_task_id,
+                tracker_name=record.tracker_name,
                 tracker_task_id=record.tracker_task_id,
-                tracker_type=self.config.tracker.type,
+                tracker_type=record.tracker_type,
                 workspace=workspace,
                 state="running",
                 agent_name=record.agent_name,
@@ -69,7 +71,12 @@ class TaskRuntime:
                 id=f"evt-{uuid.uuid4().hex}",
                 type="agent_started",
                 created_at=now,
-                data={"task_id": record.tracker_task_id, "process_id": process_id, "adapter": adapter_name},
+                data={
+                    "tracker_name": record.tracker_name,
+                    "task_id": record.tracker_task_id,
+                    "process_id": process_id,
+                    "adapter": adapter_name,
+                },
             ),
         )
 
@@ -79,8 +86,9 @@ class TaskRuntime:
         self.session_manager.workspace_repo.save_session(
             SessionState(
                 internal_task_id=record.internal_task_id,
+                tracker_name=record.tracker_name,
                 tracker_task_id=record.tracker_task_id,
-                tracker_type=self.config.tracker.type,
+                tracker_type=record.tracker_type,
                 workspace=workspace,
                 state=state,
                 agent_name=record.agent_name,
@@ -97,7 +105,12 @@ class TaskRuntime:
                 id=f"evt-{uuid.uuid4().hex}",
                 type="agent_stopped",
                 created_at=now,
-                data={"task_id": task.id, "exit_code": exit_code, "state": state},
+                data={
+                    "tracker_name": record.tracker_name,
+                    "task_id": task.id,
+                    "exit_code": exit_code,
+                    "state": state,
+                },
             ),
         )
         final_comment = (

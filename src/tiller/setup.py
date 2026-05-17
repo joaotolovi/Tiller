@@ -92,7 +92,9 @@ async def run_setup(config_path: str) -> int:
     agent_settings = await collect_agent_config()
     github_payload = await collect_github_config()
     payload: dict[str, object] = {
-        "tracker": tracker,
+        "trackers": {
+            "main": tracker,
+        },
         "agent": {
             "default": agent_name,
             **({"model": agent_settings["model"]} if agent_settings.get("model") else {}),

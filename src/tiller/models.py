@@ -43,6 +43,7 @@ class ProjectSpec:
 
 @dataclass(slots=True)
 class TrackerConfig:
+    name: str
     type: str
     trigger_status: str
     poll_interval: int = 30
@@ -120,13 +121,24 @@ class MemoryConfig:
 
 @dataclass(slots=True)
 class TillerConfig:
-    tracker: TrackerConfig
+    trackers: dict[str, TrackerConfig]
     agent: AgentRuntimeConfig
     projects: dict[str, ProjectSpec]
     session: SessionConfig
     github: GitHubConfig = field(default_factory=GitHubConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     config_path: Path | None = None
+
+    @property
+    def tracker(self) -> TrackerConfig:
+        if not self.trackers:
+            raise ValueError("At least one tracker must be configured")
+        if "default" in self.trackers:
+            return self.trackers["default"]
+        return next(iter(self.trackers.values()))
+
+    def get_tracker(self, name: str) -> TrackerConfig:
+        return self.trackers[name]
 
 
 @dataclass(slots=True)
@@ -147,6 +159,8 @@ class SessionPaths:
 @dataclass(slots=True)
 class SessionRecord:
     internal_task_id: str
+    tracker_name: str
+    tracker_type: str
     tracker_task_id: str
     agent_name: str
     workspace: Path
@@ -160,6 +174,10 @@ class SessionRecord:
     @property
     def external_task_id(self) -> str:
         return self.tracker_task_id
+
+    @property
+    def external_task_ref(self) -> str:
+        return f"{self.tracker_name}:{self.tracker_task_id}"
 
 
 @dataclass(slots=True)

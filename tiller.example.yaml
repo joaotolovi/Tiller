@@ -1,19 +1,20 @@
 # Minimal configuration required to run Tiller.
-# Uncomment and adapt one tracker section, choose an agent, and define at least one project.
+# Uncomment and adapt one tracker section under `trackers.main`, choose an agent, and define at least one project.
 
 # --- Minimum required -------------------------------------------------------
-tracker:
-  # ClickUp minimum:
-  type: clickup
-  token: YOUR_CLICKUP_TOKEN
-  team_id: "YOUR_CLICKUP_TEAM_ID"
-  trigger_status: DEVELOP
+trackers:
+  main:
+    # ClickUp minimum:
+    type: clickup
+    token: YOUR_CLICKUP_TOKEN
+    team_id: "YOUR_CLICKUP_TEAM_ID"
+    trigger_status: DEVELOP
 
-  # Telegram minimum:
-  # type: telegram
-  # bot_token: YOUR_TELEGRAM_BOT_TOKEN
-  # state_path: ~/.tiller/telegram-state.json
-  # trigger_status: new
+    # Telegram minimum:
+    # type: telegram
+    # bot_token: YOUR_TELEGRAM_BOT_TOKEN
+    # state_path: ~/.tiller/telegram-state.json
+    # trigger_status: new
 
 agent:
   default: codex
@@ -29,21 +30,22 @@ session:
 # --- Optional settings ------------------------------------------------------
 # Everything below is optional. Uncomment what you need.
 
-# tracker:
-#   # Shared tracker options
-#   poll_interval: 60
-#   processing_status: IN_PROGRESS
-#   done_status: DONE
+# trackers:
+#   main:
+#     # Shared tracker options
+#     poll_interval: 60
+#     processing_status: IN_PROGRESS
+#     done_status: DONE
 #
-#   # ClickUp-only options
-#   assignee: "CLICKUP_USER_ID"
-#   tag: backend
+#     # ClickUp-only options
+#     assignee: "CLICKUP_USER_ID"
+#     tag: backend
 #
-#   # Telegram-only options
-#   allowed_chat_ids:
-#     - "123456789"
-#   allowed_user_ids:
-#     - "987654321"
+#     # Telegram-only options
+#     allowed_chat_ids:
+#       - "123456789"
+#     allowed_user_ids:
+#       - "987654321"
 
 # agent:
 #   model: gpt-5.4

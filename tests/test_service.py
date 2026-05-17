@@ -34,7 +34,7 @@ from tiller.github import GitHubClient, PullRequestRef, GitHubAccessibleRepo
 from tiller.models import AgentRunRequest, DiscoveredAgent, GitHubConfig, ProjectSpec, SessionPaths, Task, TaskComment
 from tiller.runtime import serialize_task
 from tiller.pr_providers import GitHubPullRequestProvider, get_pull_request_provider
-from tiller.service import TillerService
+from tiller.service import TillerService, MultiTrackerService, TrackerService
 from tiller.trackers import InMemoryTrackerAdapter, ClickUpTrackerAdapter, TelegramTrackerAdapter
 from tiller.trackers.telegram import TelegramTrackerState, TelegramStateStore
 from tiller.trackers.factory import build_tracker_adapter
@@ -2591,6 +2591,36 @@ session:
     assert config.config_path == config_path.resolve()
 
 
+def test_load_config_supports_named_trackers(tmp_path: Path) -> None:
+    config_path = tmp_path / "multi-tiller.yaml"
+    config_path.write_text(
+        """
+trackers:
+  support:
+    type: memory
+    trigger_status: support-new
+  product:
+    type: memory
+    trigger_status: product-new
+    poll_interval: 15
+agent:
+  default: stub
+projects: {}
+session:
+  base_path: %s
+""" % tmp_path.as_posix(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert set(config.trackers) == {"support", "product"}
+    assert config.get_tracker("support").name == "support"
+    assert config.get_tracker("support").trigger_status == "support-new"
+    assert config.get_tracker("product").poll_interval == 15
+    assert config.tracker.name == "support"
+
+
 def test_load_session_context_accepts_external_task_id_fallback(tmp_path: Path) -> None:
     from tiller.runtime import load_session_context
 
@@ -2626,6 +2656,8 @@ session:
 
     context = load_session_context(session_root)
 
+    assert context.record.tracker_name == "default"
+    assert context.record.tracker_type == "memory"
     assert context.record.tracker_task_id == "telegram-123"
 
 
@@ -2673,8 +2705,9 @@ session:
     )
 
     config = load_config(config_path)
+    tracker_config = config.tracker
     tracker = InMemoryTrackerAdapter([])
-    service = TillerService(config=config, tracker=tracker, harness=AgentHarness({"stub": StubAdapter()}))
+    service = TillerService(config=config, tracker_config=tracker_config, tracker=tracker, harness=AgentHarness({"stub": StubAdapter()}))
 
     session_root = config.session.base_path / "TASK-ORPHAN"
     session_root.mkdir(parents=True, exist_ok=True)
@@ -2682,6 +2715,7 @@ session:
         json.dumps(
             {
                 "internal_task_id": "TASK-ORPHAN",
+                "tracker_name": "default",
                 "tracker_task_id": "task-1",
                 "external_task_id": "task-1",
                 "tracker_type": "memory",
@@ -2703,6 +2737,86 @@ session:
     assert payload["process_id"] is None
     events = [json.loads(line) for line in (session_root / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     assert any(event["type"] == "session_interrupted" for event in events)
+
+
+def test_tracker_service_uses_tracker_name_in_session_and_dedup(tmp_path: Path) -> None:
+    config_path = tmp_path / "multi-tracker.yaml"
+    config_path.write_text(
+        """
+trackers:
+  alpha:
+    type: memory
+    trigger_status: in_development
+  beta:
+    type: memory
+    trigger_status: in_development
+agent:
+  default: stub
+projects: {}
+session:
+  base_path: %s
+  keep_finished_sessions: true
+""" % tmp_path.as_posix(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+    shared_task = Task(id="same-id", title="Shared", description="Body", status="in_development")
+    alpha_tracker = InMemoryTrackerAdapter([shared_task])
+    beta_tracker = InMemoryTrackerAdapter([Task(id="same-id", title="Shared", description="Body", status="in_development")])
+    harness = AgentHarness({"stub": StubAdapter()})
+
+    alpha_service = TrackerService(
+        config=config,
+        tracker_config=config.get_tracker("alpha"),
+        tracker=alpha_tracker,
+        harness=harness,
+    )
+    beta_service = TrackerService(
+        config=config,
+        tracker_config=config.get_tracker("beta"),
+        tracker=beta_tracker,
+        harness=harness,
+    )
+
+    async def run_services() -> None:
+        await alpha_service.run_once()
+        await beta_service.run_once()
+        await asyncio.gather(*alpha_service.active_sessions.values(), *beta_service.active_sessions.values())
+
+    asyncio.run(run_services())
+
+    assert "alpha:same-id" in alpha_service.processed_tasks
+    assert "beta:same-id" in beta_service.processed_tasks
+
+    alpha_session = json.loads((config.session.base_path / alpha_service.session_manager.make_internal_task_id(shared_task) / "session.json").read_text(encoding="utf-8"))
+    beta_session = json.loads((config.session.base_path / beta_service.session_manager.make_internal_task_id(shared_task) / "session.json").read_text(encoding="utf-8"))
+
+    assert alpha_session["tracker_name"] == "alpha"
+    assert alpha_session["tracker_type"] == "memory"
+    assert beta_session["tracker_name"] == "beta"
+    assert beta_session["tracker_type"] == "memory"
+    assert alpha_session["internal_task_id"] != beta_session["internal_task_id"]
+
+
+def test_multi_tracker_service_runs_all_services() -> None:
+    class RecordingService:
+        def __init__(self) -> None:
+            self.runs = 0
+
+        async def run_forever(self) -> None:
+            self.runs += 1
+
+        async def shutdown(self) -> None:
+            return None
+
+    first = RecordingService()
+    second = RecordingService()
+
+    asyncio.run(MultiTrackerService([first, second]).run_forever())
+
+    assert first.runs == 1
+    assert second.runs == 1
 
 
 def test_session_memory_service_builds_langmem_provider(monkeypatch, tmp_path: Path) -> None:
@@ -3486,6 +3600,8 @@ def test_run_setup_writes_guided_config(tmp_path: Path, monkeypatch) -> None:
 
     assert exit_code == 0
     rendered = config_path.read_text(encoding="utf-8")
+    assert "trackers:" in rendered
+    assert "main:" in rendered
     assert "default: codex" in rendered
     assert "model: gpt-5" in rendered
     assert "token: clickup-token" in rendered
@@ -3502,8 +3618,8 @@ def test_run_setup_writes_guided_config(tmp_path: Path, monkeypatch) -> None:
     loaded = load_config(config_path)
     assert loaded.agent.default == "codex"
     assert loaded.agent.model == "gpt-5"
-    assert loaded.tracker.options["team_id"] == "team-1"
-    assert loaded.tracker.options["assignee"] == "user-1"
+    assert loaded.trackers["main"].options["team_id"] == "team-1"
+    assert loaded.trackers["main"].options["assignee"] == "user-1"
     assert loaded.github.token == "yaml-github-token"
     assert loaded.projects["frontend"].description == "Frontend app"
     assert loaded.session.base_path == Path("~/.tiller/sessions").expanduser().resolve()
@@ -3563,6 +3679,8 @@ def test_run_setup_writes_guided_config_for_telegram(tmp_path: Path, monkeypatch
 
     assert exit_code == 0
     rendered = config_path.read_text(encoding="utf-8")
+    assert "trackers:" in rendered
+    assert "main:" in rendered
     assert "default: codex" in rendered
     assert "model: gpt-5" in rendered
     assert "type: telegram" in rendered
@@ -3581,11 +3699,11 @@ def test_run_setup_writes_guided_config_for_telegram(tmp_path: Path, monkeypatch
     loaded = load_config(config_path)
     assert loaded.agent.default == "codex"
     assert loaded.agent.model == "gpt-5"
-    assert loaded.tracker.type == "telegram"
-    assert loaded.tracker.options["bot_token"] == "telegram-bot-token"
-    assert loaded.tracker.options["state_path"] == "~/.tiller/telegram-state.json"
-    assert loaded.tracker.options["allowed_chat_ids"] == ["-1001234567890"]
-    assert loaded.tracker.options["allowed_user_ids"] == ["111", "222"]
+    assert loaded.trackers["main"].type == "telegram"
+    assert loaded.trackers["main"].options["bot_token"] == "telegram-bot-token"
+    assert loaded.trackers["main"].options["state_path"] == "~/.tiller/telegram-state.json"
+    assert loaded.trackers["main"].options["allowed_chat_ids"] == ["-1001234567890"]
+    assert loaded.trackers["main"].options["allowed_user_ids"] == ["111", "222"]
     assert loaded.github.token == "yaml-github-token"
     assert loaded.projects["backend"].description == "Backend service"
 

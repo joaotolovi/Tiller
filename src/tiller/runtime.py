@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import dump_json, load_config
-from .models import ProjectSpec, SessionPaths, SessionRecord, Task
+from .models import ProjectSpec, SessionPaths, SessionRecord, Task, TrackerConfig
 from .session import SessionManager
 from .trackers import build_tracker_adapter
 
@@ -16,6 +16,31 @@ class SessionContext:
         self.root = root
         self.record = record
         self.config_path = config_path
+
+
+def _session_record_from_payload(payload: dict[str, Any], *, tracker_type: str | None = None) -> SessionRecord:
+    return SessionRecord(
+        internal_task_id=payload["internal_task_id"],
+        tracker_name=payload.get("tracker_name", "default"),
+        tracker_type=payload.get("tracker_type") or tracker_type or "unknown",
+        tracker_task_id=payload.get("tracker_task_id") or payload["external_task_id"],
+        agent_name=payload["agent_name"],
+        workspace=Path(payload["workspace"]),
+        config_path=Path(payload["config_path"]).expanduser().resolve() if payload.get("config_path") else None,
+        process_id=payload.get("process_id"),
+        started_at=payload.get("started_at"),
+        updated_at=payload.get("updated_at"),
+        state=payload.get("state") or payload.get("status", "prepared"),
+        provisioned_repos=list(payload.get("provisioned_repos", [])),
+    )
+
+
+def tracker_config_for_context(context: SessionContext) -> TrackerConfig:
+    config = load_config(context.config_path)
+    tracker_name = context.record.tracker_name
+    if tracker_name in config.trackers:
+        return config.get_tracker(tracker_name)
+    return config.tracker
 
 
 def resolve_session_root(explicit: str | Path | None = None, *, cwd: Path | None = None) -> Path:
@@ -36,18 +61,8 @@ def load_session_context(explicit: str | Path | None = None, *, cwd: Path | None
     root = resolve_session_root(explicit, cwd=cwd)
     payload = json.loads((root / "session.json").read_text(encoding="utf-8"))
     config_path = Path(payload["config_path"]).expanduser().resolve()
-    tracker_task_id = payload.get("tracker_task_id") or payload["external_task_id"]
-    record = SessionRecord(
-        internal_task_id=payload["internal_task_id"],
-        tracker_task_id=tracker_task_id,
-        agent_name=payload["agent_name"],
-        workspace=Path(payload["workspace"]),
-        config_path=config_path,
-        process_id=payload.get("process_id"),
-        started_at=payload.get("started_at"),
-        state=payload.get("state") or payload.get("status", "prepared"),
-        provisioned_repos=list(payload.get("provisioned_repos", [])),
-    )
+    config = load_config(config_path)
+    record = _session_record_from_payload(payload, tracker_type=config.tracker.type)
     return SessionContext(root=root, record=record, config_path=config_path)
 
 
@@ -77,14 +92,15 @@ def save_session_record(context: SessionContext) -> None:
 
 
 def tracker_for_context(context: SessionContext):
-    config = load_config(context.config_path)
-    return build_tracker_adapter(config.tracker.type, **config.tracker.options)
+    tracker_config = tracker_config_for_context(context)
+    return build_tracker_adapter(tracker_config.type, **tracker_config.options)
 
 
 def session_manager_for_context(context: SessionContext) -> SessionManager:
     config = load_config(context.config_path)
-    tracker = build_tracker_adapter(config.tracker.type, **config.tracker.options)
-    return SessionManager(config, tracker)
+    tracker_config = tracker_config_for_context(context)
+    tracker = build_tracker_adapter(tracker_config.type, **tracker_config.options)
+    return SessionManager(config, tracker, tracker_config)
 
 
 def project_spec_from_payload(name: str, payload: dict[str, Any]) -> ProjectSpec:

@@ -4,6 +4,11 @@ from .base import InMemoryTrackerAdapter, TrackerAdapter
 from .clickup import ClickUpTrackerAdapter
 from .telegram import TelegramTrackerAdapter
 from .stubs import UnsupportedTrackerAdapter
+from ..models import TrackerConfig
+
+
+def build_configured_tracker(tracker_config: TrackerConfig) -> TrackerAdapter:
+    return build_tracker_adapter(tracker_config.type, **tracker_config.options)
 
 
 def build_tracker_adapter(tracker_type: str, **options: object) -> TrackerAdapter:

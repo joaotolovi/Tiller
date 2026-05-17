@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 from .agents import AgentHarness
-from .models import AgentRunRequest, TillerConfig
+from .models import AgentRunRequest, TillerConfig, TrackerConfig
 from .session import SessionManager
 from .task_runtime import TaskRuntime
 from .trackers import TrackerAdapter
@@ -16,82 +16,106 @@ from .trackers import TrackerAdapter
 logger = logging.getLogger(__name__)
 
 
-class TillerService:
+class TrackerService:
     def __init__(
         self,
         *,
         config: TillerConfig,
+        tracker_config: TrackerConfig,
         tracker: TrackerAdapter,
         harness: AgentHarness,
     ) -> None:
         self.config = config
+        self.tracker_config = tracker_config
         self.tracker = tracker
         self.harness = harness
-        self.session_manager = SessionManager(config, tracker)
-        self.runtime = TaskRuntime(config=config, tracker=tracker, session_manager=self.session_manager)
+        self.session_manager = SessionManager(config, tracker, tracker_config)
+        self.runtime = TaskRuntime(
+            config=config,
+            tracker=tracker,
+            session_manager=self.session_manager,
+            tracker_config=tracker_config,
+        )
         self.processed_tasks: set[str] = set()
         self.active_sessions: dict[str, asyncio.Task[None]] = {}
         self._active_processes: dict[str, subprocess.Popen[bytes]] = {}
 
     async def run_forever(self) -> None:
         logger.info(
-            "Tiller service started tracker=%s trigger_status=%s poll_interval=%ss agent=%s",
-            self.config.tracker.type,
-            self.config.tracker.trigger_status,
-            self.config.tracker.poll_interval,
+            "Tiller tracker service started tracker_name=%s tracker_type=%s trigger_status=%s poll_interval=%ss agent=%s",
+            self.tracker_config.name,
+            self.tracker_config.type,
+            self.tracker_config.trigger_status,
+            self.tracker_config.poll_interval,
             self.config.agent.default,
         )
         try:
             await self.reconcile_orphaned_sessions()
             while True:
                 await self.run_once()
-                await asyncio.sleep(self.config.tracker.poll_interval)
+                await asyncio.sleep(self.tracker_config.poll_interval)
         except asyncio.CancelledError:
-            logger.info("Tiller service cancellation requested")
+            logger.info("Tracker service cancellation requested tracker_name=%s", self.tracker_config.name)
             await self.shutdown()
             raise
 
     async def run_once(self) -> None:
-        tasks = await self.tracker.list_tasks(self.config.tracker.trigger_status)
+        tasks = await self.tracker.list_tasks(self.tracker_config.trigger_status)
         logger.info(
-            "Tracker poll completed trigger_status=%s tasks_found=%s active_sessions=%s processed_tasks=%s",
-            self.config.tracker.trigger_status,
+            "Tracker poll completed tracker_name=%s trigger_status=%s tasks_found=%s active_sessions=%s processed_tasks=%s",
+            self.tracker_config.name,
+            self.tracker_config.trigger_status,
             len(tasks),
             len(self.active_sessions),
             len(self.processed_tasks),
         )
         for task in tasks:
-            if task.id in self.processed_tasks or task.id in self.active_sessions:
+            task_ref = self._task_ref(task.id)
+            if task_ref in self.processed_tasks or task_ref in self.active_sessions:
                 logger.debug(
-                    "Skipping task task_id=%s already_processed=%s already_active=%s",
+                    "Skipping task tracker_name=%s task_id=%s already_processed=%s already_active=%s",
+                    self.tracker_config.name,
                     task.id,
-                    task.id in self.processed_tasks,
-                    task.id in self.active_sessions,
+                    task_ref in self.processed_tasks,
+                    task_ref in self.active_sessions,
                 )
                 continue
-            logger.info("Starting task task_id=%s title=%s", task.id, task.title)
+            logger.info("Starting task tracker_name=%s task_id=%s title=%s", self.tracker_config.name, task.id, task.title)
             await self._mark_processing(task.id)
             session_task = asyncio.create_task(self._start_session(task.id))
-            self.active_sessions[task.id] = session_task
-            session_task.add_done_callback(self._make_session_done_callback(task.id))
+            self.active_sessions[task_ref] = session_task
+            session_task.add_done_callback(self._make_session_done_callback(task_ref))
 
     async def _mark_processing(self, task_id: str) -> None:
-        self.processed_tasks.add(task_id)
-        logger.info("Task claimed task_id=%s", task_id)
+        task_ref = self._task_ref(task_id)
+        self.processed_tasks.add(task_ref)
+        logger.info("Task claimed tracker_name=%s task_id=%s", self.tracker_config.name, task_id)
         await self.runtime.claim_task(task_id)
-        if self.config.tracker.processing_status:
-            logger.info("Task moved to processing status task_id=%s status=%s", task_id, self.config.tracker.processing_status)
+        if self.tracker_config.processing_status:
+            logger.info(
+                "Task moved to processing status tracker_name=%s task_id=%s status=%s",
+                self.tracker_config.name,
+                task_id,
+                self.tracker_config.processing_status,
+            )
 
     async def _start_session(self, task_id: str) -> None:
         task = await self.tracker.get_task(task_id)
-        logger.info("Preparing session task_id=%s title=%s", task_id, task.title)
+        logger.info("Preparing session tracker_name=%s task_id=%s title=%s", self.tracker_config.name, task_id, task.title)
         await self.runtime.publish_comment(
             task=task,
             text="Starting task. Analyzing...",
         )
         tool_transport = self.harness.tool_transport_for(self.config.agent.default)
         record, paths, mcp_payload = await self.session_manager.prepare(task, self.config.agent.default, tool_transport)
-        logger.info("Session ready task_id=%s internal_task_id=%s workspace=%s transport=%s", task_id, record.internal_task_id, paths.root, tool_transport)
+        logger.info(
+            "Session ready tracker_name=%s task_id=%s internal_task_id=%s workspace=%s transport=%s",
+            self.tracker_config.name,
+            task_id,
+            record.internal_task_id,
+            paths.root,
+            tool_transport,
+        )
         goal = self._build_goal_prompt(paths.root, tool_transport)
         spawn_result = await asyncio.to_thread(
             self.harness.spawn,
@@ -113,7 +137,8 @@ class TillerService:
             adapter_name=spawn_result.adapter_name,
         )
         logger.info(
-            "Agent started task_id=%s internal_task_id=%s pid=%s adapter=%s log=%s",
+            "Agent started tracker_name=%s task_id=%s internal_task_id=%s pid=%s adapter=%s log=%s",
+            self.tracker_config.name,
             task_id,
             record.internal_task_id,
             spawn_result.process_id,
@@ -124,15 +149,21 @@ class TillerService:
         if spawn_result.process is None:
             raise RuntimeError("Agent process was not returned by harness")
 
-        self._active_processes[task_id] = spawn_result.process
+        task_ref = self._task_ref(task_id)
+        self._active_processes[task_ref] = spawn_result.process
         try:
             exit_code = await asyncio.to_thread(spawn_result.process.wait)
         except asyncio.CancelledError:
-            logger.info("Session cancellation requested task_id=%s pid=%s", task_id, spawn_result.process.pid)
-            await asyncio.to_thread(self._terminate_process_tree, task_id, spawn_result.process)
+            logger.info(
+                "Session cancellation requested tracker_name=%s task_id=%s pid=%s",
+                self.tracker_config.name,
+                task_id,
+                spawn_result.process.pid,
+            )
+            await asyncio.to_thread(self._terminate_process_tree, task_ref, spawn_result.process)
             raise
         finally:
-            self._active_processes.pop(task_id, None)
+            self._active_processes.pop(task_ref, None)
 
         record.state = await self.runtime.finalize_session(
             task=task,
@@ -141,15 +172,28 @@ class TillerService:
             exit_code=exit_code,
         )
         record.updated_at = self.runtime.now()
-        logger.info("Agent finished task_id=%s internal_task_id=%s exit_code=%s", task_id, record.internal_task_id, exit_code)
+        logger.info(
+            "Agent finished tracker_name=%s task_id=%s internal_task_id=%s exit_code=%s",
+            self.tracker_config.name,
+            task_id,
+            record.internal_task_id,
+            exit_code,
+        )
 
         self.session_manager.cleanup(paths)
-        logger.info("Session finalized task_id=%s internal_task_id=%s state=%s workspace=%s", task_id, record.internal_task_id, record.state, paths.root)
+        logger.info(
+            "Session finalized tracker_name=%s task_id=%s internal_task_id=%s state=%s workspace=%s",
+            self.tracker_config.name,
+            task_id,
+            record.internal_task_id,
+            record.state,
+            paths.root,
+        )
 
     async def shutdown(self) -> None:
         if not self.active_sessions:
             return
-        logger.info("Shutting down active sessions count=%s", len(self.active_sessions))
+        logger.info("Shutting down active sessions tracker_name=%s count=%s", self.tracker_config.name, len(self.active_sessions))
         session_tasks = list(self.active_sessions.values())
         for task in session_tasks:
             task.cancel()
@@ -158,10 +202,10 @@ class TillerService:
             if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                 logger.exception("Session shutdown raised an exception", exc_info=result)
 
-    def _terminate_process_tree(self, task_id: str, process: subprocess.Popen[bytes]) -> None:
+    def _terminate_process_tree(self, task_ref: str, process: subprocess.Popen[bytes]) -> None:
         if process.poll() is not None:
             return
-        logger.info("Terminating agent process task_id=%s pid=%s", task_id, process.pid)
+        logger.info("Terminating agent process task_ref=%s pid=%s", task_ref, process.pid)
         try:
             if os.name == "posix":
                 os.killpg(process.pid, signal.SIGTERM)
@@ -169,7 +213,7 @@ class TillerService:
                 process.terminate()
             process.wait(timeout=5)
         except Exception:
-            logger.warning("Graceful process termination failed task_id=%s pid=%s; force killing", task_id, process.pid, exc_info=True)
+            logger.warning("Graceful process termination failed task_ref=%s pid=%s; force killing", task_ref, process.pid, exc_info=True)
             try:
                 if os.name == "posix":
                     os.killpg(process.pid, signal.SIGKILL)
@@ -177,7 +221,7 @@ class TillerService:
                     process.kill()
                 process.wait(timeout=5)
             except Exception:
-                logger.exception("Failed to kill agent process task_id=%s pid=%s", task_id, process.pid)
+                logger.exception("Failed to kill agent process task_ref=%s pid=%s", task_ref, process.pid)
 
     def _build_goal_prompt(self, workspace: Path, tool_transport: str) -> str:
         tool_guidance = (
@@ -202,12 +246,13 @@ class TillerService:
             if not session_file.exists():
                 continue
             state = self.session_manager.workspace_repo.load_session(session_root)
-            if state is None or state.state != "running" or state.process_id is None:
+            if state is None or state.tracker_name != self.tracker_config.name or state.state != "running" or state.process_id is None:
                 continue
             if self._process_exists(state.process_id):
                 continue
             logger.info(
-                "Reconciling orphaned session internal_task_id=%s tracker_task_id=%s stale_pid=%s",
+                "Reconciling orphaned session tracker_name=%s internal_task_id=%s tracker_task_id=%s stale_pid=%s",
+                state.tracker_name,
                 state.internal_task_id,
                 state.tracker_task_id,
                 state.process_id,
@@ -218,17 +263,17 @@ class TillerService:
             self.session_manager.workspace_repo.save_session(state)
             self.session_manager.workspace_repo.append_event(
                 session_root,
-                self.runtime_event("session_interrupted", state.tracker_task_id, state.updated_at),
+                self.runtime_event("session_interrupted", state.tracker_task_id, state.updated_at, state.tracker_name),
             )
 
-    def runtime_event(self, event_type: str, task_id: str, created_at: str):
+    def runtime_event(self, event_type: str, task_id: str, created_at: str, tracker_name: str):
         from .workspace import EventRecord
 
         return EventRecord(
-            id=f"evt-reconcile-{task_id}-{created_at}",
+            id=f"evt-reconcile-{tracker_name}-{task_id}-{created_at}",
             type=event_type,
             created_at=created_at,
-            data={"task_id": task_id},
+            data={"tracker_name": tracker_name, "task_id": task_id},
         )
 
     def _process_exists(self, process_id: int) -> bool:
@@ -240,14 +285,31 @@ class TillerService:
             return True
         return True
 
-    def _make_session_done_callback(self, task_id: str):
+    def _make_session_done_callback(self, task_ref: str):
         def _callback(task: asyncio.Task[None]) -> None:
-            self.active_sessions.pop(task_id, None)
+            self.active_sessions.pop(task_ref, None)
             try:
                 task.result()
             except asyncio.CancelledError:
-                logger.info("Session cancelled for task %s", task_id)
+                logger.info("Session cancelled for task %s", task_ref)
             except Exception:
-                logger.exception("Session failed for task %s", task_id)
+                logger.exception("Session failed for task %s", task_ref)
 
         return _callback
+
+    def _task_ref(self, task_id: str) -> str:
+        return f"{self.tracker_config.name}:{task_id}"
+
+
+class MultiTrackerService:
+    def __init__(self, services: list[TrackerService]) -> None:
+        self.services = services
+
+    async def run_forever(self) -> None:
+        await asyncio.gather(*(service.run_forever() for service in self.services))
+
+    async def shutdown(self) -> None:
+        await asyncio.gather(*(service.shutdown() for service in self.services), return_exceptions=True)
+
+
+TillerService = TrackerService
