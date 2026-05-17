@@ -36,6 +36,9 @@ class ProjectSpec:
     name: str
     url: str
     default_branch: str = "main"
+    description: str | None = None
+    source: str = "configured"
+    source_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -61,6 +64,7 @@ class SessionConfig:
     base_path: Path
     cleanup_after_hours: int | None = 24
     keep_finished_sessions: bool = False
+    repo_store_path: Path | None = None
 
 
 @dataclass(slots=True)
@@ -69,13 +73,37 @@ class GitHubConfig:
     url: str = "https://api.github.com"
     token: str | None = None
     token_env: str = "GITHUB_API_TOKEN"
+    auth_method: str = "token"
+    gh_path: str | None = None
 
     def resolve_token(self) -> str | None:
         if self.token:
             return self.token
         import os
+        import shutil
+        import subprocess
 
-        return os.environ.get(self.token_env)
+        token = os.environ.get(self.token_env)
+        if token:
+            return token
+        if self.auth_method != "browser":
+            return None
+        gh_command = self.gh_path or shutil.which("gh")
+        if not gh_command:
+            return None
+        completed = subprocess.run(
+            [gh_command, "auth", "token"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return None
+        resolved = completed.stdout.strip()
+        return resolved or None
+
+    def pr_provider_enabled(self) -> bool:
+        return self.enabled and self.resolve_token() is not None
 
 
 @dataclass(slots=True)
@@ -98,6 +126,7 @@ class TillerConfig:
     session: SessionConfig
     github: GitHubConfig = field(default_factory=GitHubConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    config_path: Path | None = None
 
 
 @dataclass(slots=True)
@@ -125,7 +154,7 @@ class SessionRecord:
     process_id: int | None = None
     started_at: str | None = None
     updated_at: str | None = None
-    state: str = "stopped"
+    state: str = "prepared"
     provisioned_repos: list[str] = field(default_factory=list)
 
     @property

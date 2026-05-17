@@ -24,6 +24,7 @@ projects:
 
 session:
   base_path: ~/.tiller/sessions
+  repo_store_path: ~/.tiller/repo-mirrors
 
 # --- Optional settings ------------------------------------------------------
 # Everything below is optional. Uncomment what you need.
@@ -54,8 +55,10 @@ session:
 # github:
 #   enabled: true
 #   url: https://api.github.com
+#   auth_method: token # or browser
 #   token_env: GITHUB_API_TOKEN
 #   token: github_pat_xxx
+#   gh_path: ~/.local/share/tiller/bin/gh
 
 # memory:
 #   enabled: true
@@ -86,5 +89,6 @@ session:
 #     default_branch: develop
 
 # session:
+#   repo_store_path: ~/.tiller/repo-mirrors
 #   cleanup_after_hours: 24
 #   keep_finished_sessions: true

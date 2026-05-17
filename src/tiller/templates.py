@@ -11,6 +11,7 @@ def render_agents_md(
     memory_enabled: bool = False,
     memory_provider: str = "local",
     memory_base_path: Path | None = None,
+    pr_tool_enabled: bool = False,
 ) -> str:
     if tool_transport == "mcp":
         tracker_section = """### Tracker tools
@@ -23,20 +24,32 @@ def render_agents_md(
 - Do not manually clone repos; use the MCP project tools so Tiller provisions the repo into the session.
 - If a project operation is available through MCP, do not use the local `tiller project ...` CLI for that operation.
 """
-        github_section = """### GitHub tools
-- Use the MCP GitHub tools for auth checks, repository checks, PR creation, and PR inspection.
-- If a GitHub operation is available through MCP, do not use the local `tiller github ...` CLI for that operation.
-"""
+        github_section = (
+            "### Pull request tools\n"
+            "- Use the MCP `create_pr` tool to open a pull request when it is available.\n"
+            "- If `create_pr` is not available, check what is available in the environment for pushing branches or opening a PR.\n"
+            "- If no PR-capable provider is available, push the branch and report the branch link(s) to the user instead of blocking on PR creation.\n"
+            if pr_tool_enabled
+            else "### Pull request tools\n"
+            "- No PR tool is currently exposed in this session.\n"
+            "- Check what is available in the environment for pushing branches or opening a PR.\n"
+            "- If no PR-capable provider is available, push the branch and report the branch link(s) to the user.\n"
+        )
         session_section = """### Session tools
 - Use the MCP session tools to inspect the current session state and important paths.
 - If a session operation is available through MCP, do not use the local `tiller session ...` CLI for that operation.
 - In MCP mode, use local `tiller ...` CLI commands only when MCP fails for the operation you need.
 """
-        session_resources = """- Projects: see `projects.json`. Request repos on demand through the MCP project tools.
-- GitHub: prefer the MCP GitHub tools for auth checks, repository checks, and PR creation.
-- Tracker: prefer the MCP tracker tools for progress and status.
-- Session memory: use `STATE.md` as the continuity source between runs.
-"""
+        session_resources = (
+            "- Projects: see `projects.json`. Request repos on demand through the MCP project tools.\n"
+            + (
+                "- Pull requests: use the MCP `create_pr` tool when it is available.\n"
+                if pr_tool_enabled
+                else "- Pull requests: no MCP PR tool is currently exposed in this session.\n"
+            )
+            + "- Tracker: prefer the MCP tracker tools for progress and status.\n"
+            + "- Session memory: use `STATE.md` as the continuity source between runs.\n"
+        )
     else:
         tracker_section = """### Tracker commands
 - Use `tiller tracker get-task` to read the current task.
@@ -51,20 +64,31 @@ def render_agents_md(
 - Do not manually clone repos; use `tiller project use <name> --reason \"...\"` so Tiller provisions the repo into the session.
 - Use `tiller project status` to see which repos have already been provisioned.
 """
-        github_section = """### GitHub commands
-- Use `tiller github auth-status` if you need to confirm GitHub access before opening a PR.
-- Use `tiller github repo-status <name>` and `tiller github pr-view --repo <name> --number <n>` when you need repository or PR context.
-- Use `tiller github create-pr --repo <name> --title \"...\" --body-file <path>` to open PRs.
-"""
+        github_section = (
+            "### Pull request commands\n"
+            "- Use `tiller pr create --repo <name> --title \\\"...\\\" --body-file <path>` to open a pull request when the command is available.\n"
+            "- If the `pr` command is not available, check what is available in the environment for pushing branches or opening a PR.\n"
+            "- If no PR-capable provider is available, push the branch and report the branch link(s) to the user instead of blocking on PR creation.\n"
+            if pr_tool_enabled
+            else "### Pull request commands\n"
+            "- No PR command is currently exposed by Tiller in this environment.\n"
+            "- Check what is available in the environment for pushing branches or opening a PR.\n"
+            "- If no PR-capable provider is available, push the branch and report the branch link(s) to the user.\n"
+        )
         session_section = """### Session commands
 - Use `tiller session status` to inspect the current session state.
 - Use `tiller session paths` to inspect the important files and directories in the session.
 """
-        session_resources = """- Projects: see `projects.json`. Request repos on demand through `tiller project use`.
-- GitHub: use local `tiller github ...` commands for auth checks, repository checks, and PR creation.
-- Tracker: use local `tiller tracker ...` commands for progress and status.
-- Session memory: use `STATE.md` as the continuity source between runs.
-"""
+        session_resources = (
+            "- Projects: see `projects.json`. Request repos on demand through `tiller project use`.\n"
+            + (
+                "- Pull requests: use local `tiller pr ...` commands when they are available.\n"
+                if pr_tool_enabled
+                else "- Pull requests: no Tiller PR command is currently exposed in this environment.\n"
+            )
+            + "- Tracker: use local `tiller tracker ...` commands for progress and status.\n"
+            + "- Session memory: use `STATE.md` as the continuity source between runs.\n"
+        )
 
     if memory_enabled and memory_provider == "local" and memory_base_path is not None:
         memory_section = f"""### Memory directory
@@ -105,15 +129,15 @@ You are an autonomous developer. You receive a task and solve it in the best pos
 - Update `STATE.md` whenever there is an important change in direction, decision, blocker, or relevant progress.
 
 ### Pull Requests
-- Always open a PR when you intentionally change code.
+- Always open a PR when you intentionally change code if a PR-capable provider or tool is available.
 - The size of the change does not matter.
 - If there was no code change, no PR is required.
 - Before pushing a branch or opening a PR for a provisioned repo, create or rename the current branch to a human-friendly branch name using native Git.
 - Use `git checkout -b <type>/<short-description>` or `git branch -m <type>/<short-description>` in the repo before pushing or opening the PR.
-- In MCP mode, prefer the MCP GitHub tools to open PRs and inspect repository or PR context.
-- In CLI mode, use `tiller github create-pr --repo <name> --title \"...\" --body-file <path>` to open PRs.
-- In CLI mode, use `tiller github repo-status <name>` and `tiller github pr-view --repo <name> --number <n>` when you need repository or PR context.
-- In CLI mode, use `tiller github auth-status` if you need to confirm GitHub access before opening a PR.
+- In MCP mode, use the MCP `create_pr` tool when it is available.
+- In CLI mode, use `tiller pr create --repo <name> --title \"...\" --body-file <path>` when it is available.
+- Before opening a PR, check whether the current environment exposes a configured PR path.
+- If no PR-capable provider is available, push the branch and report the branch link(s) to the user.
 - When you open a PR, comment on the tracker with the link and enough context for a human to understand it.
 
 {tracker_section}

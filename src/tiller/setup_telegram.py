@@ -3,22 +3,24 @@ from __future__ import annotations
 from .setup_prompts import prompt_text, prompt_yes_no
 
 
+DEFAULT_TELEGRAM_STATE_PATH = "~/.tiller/telegram-state.json"
+DEFAULT_TELEGRAM_TRIGGER_STATUS = "new"
+DEFAULT_TELEGRAM_POLL_INTERVAL = 5
+
+
 class TelegramSetupProvider:
     name = "telegram"
     label = "Telegram"
 
     async def collect(self) -> dict[str, object]:
         bot_token = await prompt_text("Telegram bot token", secret=True)
-        state_path = await prompt_text("Local state path", default="~/.tiller/telegram-state.json")
-        trigger_status = (await prompt_text("Status that triggers Tiller", default="new")).strip()
-        poll_interval = int(await prompt_text("Polling interval in seconds", default="5"))
 
         tracker: dict[str, object] = {
             "type": "telegram",
             "bot_token": bot_token,
-            "state_path": state_path,
-            "trigger_status": trigger_status,
-            "poll_interval": poll_interval,
+            "state_path": DEFAULT_TELEGRAM_STATE_PATH,
+            "trigger_status": DEFAULT_TELEGRAM_TRIGGER_STATUS,
+            "poll_interval": DEFAULT_TELEGRAM_POLL_INTERVAL,
         }
 
         if await prompt_yes_no("Filter by chat IDs?", default=False):

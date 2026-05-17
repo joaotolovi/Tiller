@@ -20,6 +20,9 @@ CONFIG_PATH="${TILLER_CONFIG_PATH:-$CONFIG_DIR/tiller.yaml}"
 LOG_DIR="${TILLER_LOG_DIR:-$DEFAULT_STATE_HOME/tiller/logs}"
 SERVICE_NAME="${TILLER_SERVICE_NAME:-tiller}"
 UV_BIN=""
+GH_BIN=""
+GH_VERSION="${TILLER_GH_VERSION:-2.92.0}"
+TILLER_BIN_DIR="${TILLER_BIN_DIR:-$INSTALL_DIR/bin}"
 
 info()    { printf '\033[0;34m[tiller-install]\033[0m %s\n' "$1"; }
 success() { printf '\033[0;32m[tiller-install]\033[0m %s\n' "$1"; }
@@ -119,6 +122,63 @@ ensure_uv() {
   die "uv installation finished but binary was not found. Check https://docs.astral.sh/uv/"
 }
 
+ensure_gh() {
+  if command -v gh >/dev/null 2>&1; then
+    GH_BIN="$(command -v gh)"
+    info "Found gh at $GH_BIN"
+    return
+  fi
+
+  local existing="$TILLER_BIN_DIR/gh"
+  if [ -x "$existing" ]; then
+    GH_BIN="$existing"
+    export PATH="$TILLER_BIN_DIR:$PATH"
+    info "Found gh at $GH_BIN"
+    return
+  fi
+
+  require_command curl
+  require_command tar
+  mkdir -p "$TILLER_BIN_DIR"
+
+  local os arch archive_ext platform archive_name download_url tmp_dir extracted_dir gh_candidate
+  case "$(uname -s)" in
+    Linux) platform="linux" archive_ext="tar.gz" ;;
+    Darwin) platform="macOS" archive_ext="tar.gz" ;;
+    *) warn "Unsupported platform for bundled gh install: $(uname -s)"; return ;;
+  esac
+
+  case "$(uname -m)" in
+    x86_64|amd64) arch="amd64" ;;
+    arm64|aarch64) arch="arm64" ;;
+    *) warn "Unsupported architecture for bundled gh install: $(uname -m)"; return ;;
+  esac
+
+  archive_name="gh_${GH_VERSION}_${platform}_${arch}.${archive_ext}"
+  download_url="https://github.com/cli/cli/releases/download/v${GH_VERSION}/${archive_name}"
+  tmp_dir="$(mktemp -d)"
+  trap "rm -rf '$tmp_dir'" RETURN
+
+  info "Installing GitHub CLI locally..."
+  if ! curl -fsSL "$download_url" -o "$tmp_dir/$archive_name"; then
+    warn "Could not download GitHub CLI from $download_url"
+    return
+  fi
+  tar -xzf "$tmp_dir/$archive_name" -C "$tmp_dir"
+  extracted_dir="$tmp_dir/gh_${GH_VERSION}_${platform}_${arch}"
+  gh_candidate="$extracted_dir/bin/gh"
+  if [ ! -x "$gh_candidate" ]; then
+    warn "Downloaded GitHub CLI archive did not contain expected gh binary"
+    return
+  fi
+
+  cp "$gh_candidate" "$existing"
+  chmod +x "$existing"
+  GH_BIN="$existing"
+  export PATH="$TILLER_BIN_DIR:$PATH"
+  success "Installed gh at $GH_BIN"
+}
+
 download_source() {
   require_command curl
   require_command tar
@@ -157,7 +217,7 @@ run_setup() {
     (
       exec < /dev/tty > /dev/tty 2>&1
       cd "$INSTALL_DIR"
-      "$UV_BIN" run tiller setup --config "$CONFIG_PATH"
+      TILLER_GH_PATH="$GH_BIN" "$UV_BIN" run tiller setup --config "$CONFIG_PATH"
     ) || die "Setup failed."
     return
   fi
@@ -201,7 +261,8 @@ WantedBy=default.target
 EOF
 
   systemctl --user daemon-reload
-  systemctl --user enable --now "${SERVICE_NAME}.service"
+  systemctl --user enable "${SERVICE_NAME}.service"
+  systemctl --user restart "${SERVICE_NAME}.service"
   success "Installed systemd user service: ${SERVICE_NAME}.service"
 }
 
@@ -246,6 +307,7 @@ EOF
 
   launchctl unload "$plist_path" >/dev/null 2>&1 || true
   launchctl load "$plist_path"
+  launchctl kickstart -k "gui/$(id -u)/com.tiller.${SERVICE_NAME}" >/dev/null 2>&1 || true
   success "Installed launchd agent: com.tiller.${SERVICE_NAME}"
 }
 
@@ -335,6 +397,7 @@ main() {
   ensure_uv
   download_source
   ensure_runtime
+  ensure_gh
   run_setup
   write_runner_script
   install_service

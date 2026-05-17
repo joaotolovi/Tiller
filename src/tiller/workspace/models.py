@@ -8,7 +8,7 @@ from typing import Any
 @dataclass(slots=True)
 class SessionState:
     internal_task_id: str
-    external_task_id: str
+    tracker_task_id: str
     tracker_type: str
     workspace: Path
     state: str
@@ -18,6 +18,10 @@ class SessionState:
     started_at: str | None = None
     updated_at: str | None = None
     provisioned_repos: list[str] = field(default_factory=list)
+
+    @property
+    def external_task_id(self) -> str:
+        return self.tracker_task_id
 
 
 @dataclass(slots=True)

@@ -9,6 +9,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from ..config import dump_json, load_config
 from ..operations import (
     SessionOperations,
     tracker_comment_async,
@@ -17,6 +18,7 @@ from ..operations import (
     tracker_set_status_async,
     tracker_status_options_async,
 )
+from ..pr_providers import get_pull_request_provider
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,18 @@ def _write_session_record(session_root: Path, record: dict[str, Any]) -> None:
 
 def _session_projects(session_root: Path) -> dict[str, dict[str, Any]]:
     return json.loads((session_root / "projects.json").read_text(encoding="utf-8"))
+
+
+def _pr_provider_enabled(session_root: Path) -> bool:
+    record = _session_record(session_root)
+    config_path = record.get("config_path")
+    if not config_path:
+        return False
+    try:
+        config = load_config(str(config_path))
+    except Exception:
+        return False
+    return get_pull_request_provider(config) is not None
 
 
 def _log_tool_call(session_root: Path, tracker_task_id: str, tool_name: str, **fields: Any) -> None:
@@ -86,45 +100,28 @@ def build_tracker_server(session_root: Path) -> FastMCP:
         _log_tool_call(session_root, tracker_task_id, "project_use", name=name)
         return json.dumps(SessionOperations(session_root).project_use(name, reason), indent=2, ensure_ascii=False)
 
-    @mcp.tool()
-    async def github_auth_status() -> str:
-        _log_tool_call(session_root, tracker_task_id, "github_auth_status")
-        return json.dumps(SessionOperations(session_root).github_auth_status(), indent=2, ensure_ascii=False)
+    if _pr_provider_enabled(session_root):
+        @mcp.tool()
+        async def create_pr(
+            repo: str,
+            title: str,
+            body: str = "",
+            base: str | None = None,
+            head: str | None = None,
+        ) -> str:
+            _log_tool_call(session_root, tracker_task_id, "create_pr", repo=repo)
+            return json.dumps(
+                SessionOperations(session_root).create_pr(
+                    repo_name=repo,
+                    title=title,
+                    body=body,
+                    base=base,
+                    head=head,
+                ),
+                indent=2,
+                ensure_ascii=False,
+            )
 
-    @mcp.tool()
-    async def github_repo_status(repo: str) -> str:
-        _log_tool_call(session_root, tracker_task_id, "github_repo_status", repo=repo)
-        return json.dumps(SessionOperations(session_root).github_repo_status(repo), indent=2, ensure_ascii=False)
-
-    @mcp.tool()
-    async def github_create_pr(
-        repo: str,
-        title: str,
-        body: str = "",
-        base: str | None = None,
-        head: str | None = None,
-    ) -> str:
-        _log_tool_call(session_root, tracker_task_id, "github_create_pr", repo=repo)
-        return json.dumps(
-            SessionOperations(session_root).github_create_pr(
-                repo_name=repo,
-                title=title,
-                body=body,
-                base=base,
-                head=head,
-            ),
-            indent=2,
-            ensure_ascii=False,
-        )
-
-    @mcp.tool()
-    async def github_pr_view(repo: str, number: int) -> str:
-        _log_tool_call(session_root, tracker_task_id, "github_pr_view", repo=repo, number=number)
-        return json.dumps(
-            SessionOperations(session_root).github_pr_view(repo_name=repo, number=number),
-            indent=2,
-            ensure_ascii=False,
-        )
 
     @mcp.tool()
     async def session_status() -> str:

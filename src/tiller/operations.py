@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_config
-from .github import GitHubClient, PullRequestRef, read_repo_metadata, repo_ref_from_project
+from .github import GitHubClient, PullRequestRef
 from .models import ProjectSpec, SessionPaths, Task
+from .pr_providers import get_pull_request_provider
 from .runtime import (
     load_session_context,
     load_session_projects,
@@ -91,8 +92,12 @@ class SessionOperations:
                     "name": name,
                     "path": str(self.context.root / data["repo_path"]),
                     "provisioned": name in provisioned,
+                    "available": bool(data.get("available", True)),
                     "url": data["url"],
                     "default_branch": data.get("default_branch", "main"),
+                    "description": data.get("description"),
+                    "source": data.get("source", "configured"),
+                    "source_path": data.get("source_path"),
                 }
             )
         return payload
@@ -127,6 +132,9 @@ class SessionOperations:
             "already_provisioned": already_provisioned,
             "url": spec.url,
             "default_branch": spec.default_branch,
+            "description": spec.description,
+            "source": spec.source,
+            "source_path": spec.source_path,
         }
 
     def github_auth_status(self) -> dict[str, Any]:
@@ -146,7 +154,7 @@ class SessionOperations:
         finally:
             client.close()
 
-    def github_create_pr(
+    def create_pr(
         self,
         *,
         repo_name: str,
@@ -156,38 +164,26 @@ class SessionOperations:
         head: str | None = None,
     ) -> dict[str, Any]:
         config = self._config()
-        client = GitHubClient(config.github)
-        try:
-            projects = self._projects()
-            if repo_name not in projects:
-                raise ValueError(f"Unknown project: {repo_name}")
-            project = project_spec_from_payload(repo_name, projects[repo_name])
-            repo_ref = repo_ref_from_project(project)
-            repo_path = self.context.root / projects[repo_name]["repo_path"]
-            metadata = read_repo_metadata(repo_path)
-            resolved_head = head or str(metadata.get("branch") or "")
-            if not resolved_head:
-                raise ValueError(f"No branch metadata found for project: {repo_name}")
-            pull_request = client.create_pull_request(
-                repo=repo_ref,
-                title=title,
-                body=body,
-                head=resolved_head,
-                base=base or project.default_branch,
-            )
-            return serialize_pull_request(pull_request)
-        finally:
-            client.close()
+        binding = get_pull_request_provider(config)
+        if binding is None:
+            raise RuntimeError("No pull request provider is configured for this session")
+        projects = self._projects()
+        if repo_name not in projects:
+            raise ValueError(f"Unknown project: {repo_name}")
+        project = project_spec_from_payload(repo_name, projects[repo_name])
+        repo_path = self.context.root / projects[repo_name]["repo_path"]
+        pull_request = binding.provider.create_pull_request(
+            project=project,
+            repo_path=repo_path,
+            title=title,
+            body=body,
+            base=base,
+            head=head,
+        )
+        payload = serialize_pull_request(pull_request)
+        payload["provider"] = binding.name
+        return payload
 
-    def github_pr_view(self, *, repo_name: str, number: int) -> dict[str, Any]:
-        config = self._config()
-        client = GitHubClient(config.github)
-        try:
-            repo_ref = repo_ref_from_project(self._project_spec(repo_name))
-            pull_request = client.get_pull_request(repo=repo_ref, number=number)
-            return serialize_pull_request(pull_request)
-        finally:
-            client.close()
 
     def session_status(self) -> dict[str, Any]:
         return {

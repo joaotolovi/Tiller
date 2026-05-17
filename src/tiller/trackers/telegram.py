@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from collections.abc import Sequence
 from urllib.parse import urlparse
 
 import httpx
@@ -67,6 +68,16 @@ class TelegramStateStore:
         self.path.write_text(json.dumps(state.to_payload(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+TELEGRAM_BOT_COMMANDS: tuple[dict[str, str], ...] = (
+    {"command": "start", "description": "Show bot instructions"},
+    {"command": "new", "description": "Create a new task"},
+)
+
+
+def _commands_payload(commands: Sequence[dict[str, str]]) -> list[dict[str, str]]:
+    return [{"command": str(item["command"]), "description": str(item["description"])} for item in commands]
+
+
 class TelegramTrackerAdapter(TrackerAdapter):
     def __init__(
         self,
@@ -88,6 +99,7 @@ class TelegramTrackerAdapter(TrackerAdapter):
         payload = response.json()
         if not payload.get("ok"):
             raise ValueError("Telegram tracker validation failed")
+        await self._register_commands()
 
     async def list_tasks(self, status: str) -> list[Task]:
         state = await self._sync_updates()
@@ -172,6 +184,13 @@ class TelegramTrackerAdapter(TrackerAdapter):
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    async def _register_commands(self) -> None:
+        response = await self._client.post("/setMyCommands", json={"commands": _commands_payload(TELEGRAM_BOT_COMMANDS)})
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("ok"):
+            raise ValueError("Telegram setMyCommands failed")
 
     def _send_system_message(self, chat_id: str, text: str) -> None:
         import asyncio

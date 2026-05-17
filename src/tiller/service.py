@@ -42,6 +42,7 @@ class TillerService:
             self.config.agent.default,
         )
         try:
+            await self.reconcile_orphaned_sessions()
             while True:
                 await self.run_once()
                 await asyncio.sleep(self.config.tracker.poll_interval)
@@ -86,7 +87,7 @@ class TillerService:
         logger.info("Preparing session task_id=%s title=%s", task_id, task.title)
         await self.runtime.publish_comment(
             task=task,
-            text="Starting development. Analyzing the task and identifying required repos.",
+            text="Starting task. Analyzing...",
         )
         tool_transport = self.harness.tool_transport_for(self.config.agent.default)
         record, paths, mcp_payload = await self.session_manager.prepare(task, self.config.agent.default, tool_transport)
@@ -192,6 +193,52 @@ class TillerService:
             "Always open a PR when code changes are made. "
             f"Workspace: {workspace}"
         )
+
+    async def reconcile_orphaned_sessions(self) -> None:
+        for session_root in self.config.session.base_path.iterdir():
+            if not session_root.is_dir():
+                continue
+            session_file = session_root / "session.json"
+            if not session_file.exists():
+                continue
+            state = self.session_manager.workspace_repo.load_session(session_root)
+            if state is None or state.state != "running" or state.process_id is None:
+                continue
+            if self._process_exists(state.process_id):
+                continue
+            logger.info(
+                "Reconciling orphaned session internal_task_id=%s tracker_task_id=%s stale_pid=%s",
+                state.internal_task_id,
+                state.tracker_task_id,
+                state.process_id,
+            )
+            state.state = "interrupted"
+            state.process_id = None
+            state.updated_at = self.runtime.now()
+            self.session_manager.workspace_repo.save_session(state)
+            self.session_manager.workspace_repo.append_event(
+                session_root,
+                self.runtime_event("session_interrupted", state.tracker_task_id, state.updated_at),
+            )
+
+    def runtime_event(self, event_type: str, task_id: str, created_at: str):
+        from .workspace import EventRecord
+
+        return EventRecord(
+            id=f"evt-reconcile-{task_id}-{created_at}",
+            type=event_type,
+            created_at=created_at,
+            data={"task_id": task_id},
+        )
+
+    def _process_exists(self, process_id: int) -> bool:
+        try:
+            os.kill(process_id, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
 
     def _make_session_done_callback(self, task_id: str):
         def _callback(task: asyncio.Task[None]) -> None:

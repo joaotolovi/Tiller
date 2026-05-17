@@ -12,6 +12,7 @@ from .agents.common import write_native_mcp_project_files
 from .config import dump_json
 from .mcp import write_mcp_config
 from .models import ProjectSpec, SessionPaths, SessionRecord, Task, TillerConfig
+from .pr_providers import get_pull_request_provider
 from .repo_seed import RepoSeedManager
 from .templates import render_agents_md, render_task_md
 from .trackers import TrackerAdapter
@@ -23,7 +24,12 @@ class SessionManager:
         self.config = config
         self.tracker = tracker
         self.config.session.base_path.mkdir(parents=True, exist_ok=True)
-        self.repo_seed_manager = RepoSeedManager(self.config.session.base_path, self.config.github.resolve_token())
+        repo_store_path = self.config.session.repo_store_path or (self.config.session.base_path / "repo-mirrors")
+        self.repo_seed_manager = RepoSeedManager(
+            self.config.session.base_path,
+            self.config.github.resolve_token(),
+            mirrors_dir=repo_store_path,
+        )
         self.workspace_repo = WorkspaceRepository(self.config.session.base_path)
 
     def make_internal_task_id(self, task: Task) -> str:
@@ -72,6 +78,7 @@ class SessionManager:
                 memory_enabled=self.config.memory.enabled,
                 memory_provider=self.config.memory.provider,
                 memory_base_path=self.config.memory.base_path,
+                pr_tool_enabled=get_pull_request_provider(self.config) is not None,
             ),
             encoding="utf-8",
         )
@@ -83,8 +90,8 @@ class SessionManager:
             record = existing_record
             record.agent_name = agent_name
             record.workspace = paths.root
-            record.config_path = Path("tiller.yaml").resolve()
-            record.state = "stopped"
+            record.config_path = self.config.config_path
+            record.state = "prepared"
             record.updated_at = now
             if record.started_at is None:
                 record.started_at = now
@@ -94,10 +101,10 @@ class SessionManager:
                 tracker_task_id=task.id,
                 agent_name=agent_name,
                 workspace=paths.root,
-                config_path=Path("tiller.yaml").resolve(),
+                config_path=self.config.config_path,
                 started_at=now,
                 updated_at=now,
-                state="stopped",
+                state="prepared",
             )
 
         dump_json(paths.state_json, record)
@@ -118,6 +125,7 @@ class SessionManager:
                 **asdict(spec),
                 "repo_path": f"repos/{spec.name}",
                 "provision_method": "seed_copy",
+                "available": True,
             }
             for name, spec in self.config.projects.items()
         }
@@ -160,7 +168,7 @@ class SessionManager:
             process_id=payload.get("process_id"),
             started_at=payload.get("started_at"),
             updated_at=payload.get("updated_at"),
-            state=payload.get("state") or payload.get("status", "stopped"),
+            state=payload.get("state") or payload.get("status", "prepared"),
             provisioned_repos=list(payload.get("provisioned_repos", [])),
         )
 
@@ -201,7 +209,7 @@ class SessionManager:
         self.workspace_repo.save_session(
             SessionState(
                 internal_task_id=record.internal_task_id,
-                external_task_id=record.tracker_task_id,
+                tracker_task_id=record.tracker_task_id,
                 tracker_type=self.config.tracker.type,
                 workspace=paths.root,
                 state=record.state,
@@ -237,7 +245,7 @@ class SessionManager:
                 type="agent_ready",
                 created_at=now,
                 data={
-                    "external_task_id": task.id,
+                    "tracker_task_id": task.id,
                     "tracker_type": self.config.tracker.type,
                     "workspace": str(paths.root),
                     "resumed": resumed,

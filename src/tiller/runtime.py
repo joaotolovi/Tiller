@@ -45,7 +45,7 @@ def load_session_context(explicit: str | Path | None = None, *, cwd: Path | None
         config_path=config_path,
         process_id=payload.get("process_id"),
         started_at=payload.get("started_at"),
-        state=payload.get("state") or payload.get("status", "stopped"),
+        state=payload.get("state") or payload.get("status", "prepared"),
         provisioned_repos=list(payload.get("provisioned_repos", [])),
     )
     return SessionContext(root=root, record=record, config_path=config_path)
@@ -92,6 +92,9 @@ def project_spec_from_payload(name: str, payload: dict[str, Any]) -> ProjectSpec
         name=name,
         url=payload["url"],
         default_branch=payload.get("default_branch", "main"),
+        description=payload.get("description"),
+        source=payload.get("source", "configured"),
+        source_path=payload.get("source_path"),
     )
 
 

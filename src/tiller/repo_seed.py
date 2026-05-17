@@ -9,11 +9,35 @@ from urllib.parse import urlparse
 from .models import ProjectSpec, SessionPaths
 
 
+def discover_local_projects(mirrors_dir: Path | None) -> dict[str, ProjectSpec]:
+    if mirrors_dir is None:
+        return {}
+    root = Path(mirrors_dir).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        return {}
+
+    projects: dict[str, ProjectSpec] = {}
+    for child in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+        if not child.is_dir() or not (child / ".git").exists():
+            continue
+        name = child.name
+        url = _read_git_remote_url(child) or child.as_uri()
+        default_branch = _read_local_default_branch(child) or "main"
+        projects[name] = ProjectSpec(
+            name=name,
+            url=url,
+            default_branch=default_branch,
+            source="local_directory",
+            source_path=str(child),
+        )
+    return projects
+
+
 class RepoSeedManager:
-    def __init__(self, storage_root: Path, clone_token: str | None = None) -> None:
+    def __init__(self, storage_root: Path, clone_token: str | None = None, mirrors_dir: Path | None = None) -> None:
         self.storage_root = storage_root
         self.clone_token = clone_token
-        self.mirrors_dir = self.storage_root / "repo-mirrors"
+        self.mirrors_dir = mirrors_dir or (self.storage_root / "repo-mirrors")
         self.mirrors_dir.mkdir(parents=True, exist_ok=True)
 
     def provision(self, *, paths: SessionPaths, project: ProjectSpec, branch_name: str | None = None) -> Path:
@@ -38,6 +62,10 @@ class RepoSeedManager:
         shutil.rmtree(repo_path, ignore_errors=True)
 
     def _ensure_seed(self, project: ProjectSpec) -> Path:
+        local_source = self._local_source_path(project)
+        if local_source is not None:
+            return local_source
+
         seed_path = self.mirrors_dir / project.name
         if seed_path.exists():
             self._git(["git", "fetch", "origin", "--prune"], cwd=seed_path)
@@ -48,6 +76,14 @@ class RepoSeedManager:
         self._git(["git", "checkout", project.default_branch], cwd=seed_path)
         self._git(["git", "reset", "--hard", f"origin/{project.default_branch}"], cwd=seed_path)
         return seed_path
+
+    def _local_source_path(self, project: ProjectSpec) -> Path | None:
+        if project.source != "local_directory" or not project.source_path:
+            return None
+        path = Path(project.source_path).expanduser().resolve()
+        if not path.exists() or not (path / ".git").exists():
+            raise RuntimeError(f"Local repository source is unavailable: {path}")
+        return path
 
     def _clone_project(self, project: ProjectSpec, seed_path: Path) -> None:
         last_error: RuntimeError | None = None
@@ -130,3 +166,29 @@ class RepoSeedManager:
                 f"Git command failed ({' '.join(command)}): {completed.stderr.strip() or completed.stdout.strip()}"
             )
         return completed.stdout
+
+
+def _read_git_remote_url(repo_path: Path) -> str | None:
+    completed = subprocess.run(
+        ["git", "config", "--get", "remote.origin.url"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    value = completed.stdout.strip()
+    return value or None
+
+
+def _read_local_default_branch(repo_path: Path) -> str | None:
+    completed = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    value = completed.stdout.strip()
+    return value or None

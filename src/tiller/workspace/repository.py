@@ -25,10 +25,10 @@ class WorkspaceRepository:
         payload = json.loads(path.read_text(encoding="utf-8"))
         return SessionState(
             internal_task_id=payload["internal_task_id"],
-            external_task_id=payload["external_task_id"],
+            tracker_task_id=payload.get("tracker_task_id") or payload["external_task_id"],
             tracker_type=payload["tracker_type"],
             workspace=Path(payload["workspace"]),
-            state=payload.get("state") or payload.get("status", "stopped"),
+            state=payload.get("state") or payload.get("status", "prepared"),
             agent_name=payload["agent_name"],
             config_path=Path(payload["config_path"]) if payload.get("config_path") else None,
             process_id=payload.get("process_id"),

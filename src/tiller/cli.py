@@ -12,6 +12,7 @@ from .agents import load_harness
 from .commands import handle_session_command, register_session_subcommands
 from .config import load_config
 from .github import GitHubClient
+from .pr_providers import get_pull_request_provider
 from .service import TillerService
 from .setup import run_setup
 from .trackers import build_tracker_adapter
@@ -19,25 +20,32 @@ from .trackers import build_tracker_adapter
 logger = logging.getLogger(__name__)
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(config_path: str = "tiller.yaml") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tiller")
-    parser.add_argument("--config", default="tiller.yaml", help="Path to tiller.yaml")
+    parser.add_argument("--config", default=config_path, help="Path to tiller.yaml")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Logging level")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run the tracker watcher service")
-    run_parser.add_argument("--config", dest="config", default="tiller.yaml", help="Path to tiller.yaml")
+    run_parser.add_argument("--config", dest="config", default=config_path, help="Path to tiller.yaml")
     run_parser.add_argument("--log-level", dest="log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Logging level")
 
     discover_parser = subparsers.add_parser("discover-agents", help="List available agent adapters")
-    discover_parser.add_argument("--config", dest="config", default="tiller.yaml", help="Path to tiller.yaml")
+    discover_parser.add_argument("--config", dest="config", default=config_path, help="Path to tiller.yaml")
     discover_parser.add_argument("--log-level", dest="log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Logging level")
 
     setup_parser = subparsers.add_parser("setup", help="Run interactive setup")
-    setup_parser.add_argument("--config", dest="config", default="tiller.yaml", help="Path to tiller.yaml")
+    setup_parser.add_argument("--config", dest="config", default=config_path, help="Path to tiller.yaml")
     setup_parser.add_argument("--log-level", dest="log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Logging level")
 
-    register_session_subcommands(subparsers)
+    pr_provider_enabled = False
+    try:
+        config = load_config(config_path)
+        pr_provider_enabled = get_pull_request_provider(config) is not None
+    except Exception:
+        pr_provider_enabled = False
+
+    register_session_subcommands(subparsers, pr_provider_enabled=pr_provider_enabled)
     return parser
 
 
@@ -75,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "setup":
         return asyncio.run(run_setup(args.config))
 
-    if args.command in {"tracker", "project", "github", "session", "memory"}:
+    if args.command in {"tracker", "project", "pr", "session", "memory"}:
         return handle_session_command(args)
 
     config = load_config(args.config)

@@ -2,24 +2,38 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import httpx
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from tiller.agents import AgentHarness, CLIAdapter, SpawnResult
 from tiller.agents.kimi import KimiAdapter
 from tiller.agents.copilot import CopilotAdapter
-from tiller.setup import render_setup_config, run_setup
+from tiller.setup import render_setup_config, run_setup, _list_accessible_github_repos
 from tiller.config import load_config
 from tiller.mcp.config import write_mcp_config
+from tiller.mcp.server import build_tracker_server
 from tiller.agents.common import write_native_mcp_project_files
-from tiller.setup_prompts import collect_projects, detect_project_default_branch, validate_project_clone_url
-from tiller.github import GitHubClient, PullRequestRef
+from tiller.setup_prompts import (
+    collect_projects,
+    detect_project_default_branch,
+    validate_project_clone_url,
+    collect_github_config,
+    detect_gh_cli,
+    ensure_gh_authentication,
+    is_gh_authenticated,
+    login_with_gh_cli,
+)
+from tiller.github import GitHubClient, PullRequestRef, GitHubAccessibleRepo
 from tiller.models import AgentRunRequest, DiscoveredAgent, GitHubConfig, ProjectSpec, SessionPaths, Task, TaskComment
 from tiller.runtime import serialize_task
+from tiller.pr_providers import GitHubPullRequestProvider, get_pull_request_provider
 from tiller.service import TillerService
 from tiller.trackers import InMemoryTrackerAdapter, ClickUpTrackerAdapter, TelegramTrackerAdapter
 from tiller.trackers.telegram import TelegramTrackerState, TelegramStateStore
@@ -29,7 +43,7 @@ from tiller.trackers.sync_clickup import SyncClickUpTrackerAdapter
 from tiller.trackers.sync_base import SyncTrackerAdapter
 from tiller.setup_clickup import ClickUpSetupProvider
 from tiller.setup_telegram import TelegramSetupProvider
-from tiller.repo_seed import RepoSeedManager
+from tiller.repo_seed import RepoSeedManager, discover_local_projects
 from tiller.templates import render_agents_md
 from tiller.mcp.server import build_tracker_server
 from tiller.agents.cloudflare_agents import CloudflareAgentsAdapter
@@ -49,22 +63,272 @@ class QuestionaryPromptStub:
         return self._answer
 
 
-def install_questionary_stub(monkeypatch, *, text_answers=None, password_answers=None, confirm_answers=None, select_answers=None) -> None:
+def install_questionary_stub(monkeypatch, *, text_answers=None, password_answers=None, confirm_answers=None, select_answers=None, checkbox_answers=None) -> None:
     text_iter = iter(text_answers or [])
     password_iter = iter(password_answers or [])
     confirm_iter = iter(confirm_answers or [])
     select_iter = iter(select_answers or [])
+    checkbox_iter = iter(checkbox_answers or [])
 
     monkeypatch.setattr("tiller.setup_prompts.questionary.text", lambda *args, **kwargs: QuestionaryPromptStub(next(text_iter)))
     monkeypatch.setattr("tiller.setup_prompts.questionary.password", lambda *args, **kwargs: QuestionaryPromptStub(next(password_iter)))
     monkeypatch.setattr("tiller.setup_prompts.questionary.confirm", lambda *args, **kwargs: QuestionaryPromptStub(next(confirm_iter)))
     monkeypatch.setattr("tiller.setup_prompts.questionary.select", lambda *args, **kwargs: QuestionaryPromptStub(next(select_iter)))
+    monkeypatch.setattr("tiller.setup_prompts.questionary.checkbox", lambda *args, **kwargs: QuestionaryPromptStub(next(checkbox_iter)))
+
+
+def test_unix_installer_installs_gh_after_source_sync() -> None:
+    installer = Path("installers/install.sh").read_text(encoding="utf-8")
+
+    ensure_gh_index = installer.index("  ensure_gh\n")
+    download_source_index = installer.index("  download_source\n")
+    ensure_runtime_index = installer.index("  ensure_runtime\n")
+
+    assert download_source_index < ensure_runtime_index < ensure_gh_index
+
+
+def test_windows_installer_installs_gh_after_source_sync() -> None:
+    installer = Path("installers/install.ps1").read_text(encoding="utf-8")
+
+    gh_index = installer.index("$GhPath = Get-GhPath")
+    download_source_index = installer.index("Download-Source")
+    sync_runtime_index = installer.index("Sync-Runtime -UvPath $UvPath")
+
+    assert download_source_index < sync_runtime_index < gh_index
+
+
+def test_detect_gh_cli_prefers_installer_path(monkeypatch, tmp_path: Path) -> None:
+    gh_path = tmp_path / "gh"
+    gh_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    gh_path.chmod(0o755)
+
+    monkeypatch.setenv("TILLER_GH_PATH", str(gh_path))
+    monkeypatch.setattr("tiller.setup_prompts.shutil.which", lambda command: None)
+
+    assert detect_gh_cli() == str(gh_path.resolve())
+
+
+def test_collect_projects_selects_github_repositories_async(monkeypatch) -> None:
+    install_questionary_stub(
+        monkeypatch,
+        select_answers=["select", "confirm"],
+        checkbox_answers=[
+            [
+                {
+                    "name": "frontend",
+                    "full_name": "org/frontend",
+                    "url": "https://github.com/org/frontend",
+                    "default_branch": "main",
+                    "description": "Frontend app",
+                    "pushed_at": "2026-05-15T10:00:00Z",
+                }
+            ]
+        ],
+    )
+
+    async def fake_run_with_loading(message, func, *args):
+        return [
+            {
+                "name": "frontend",
+                "full_name": "org/frontend",
+                "url": "https://github.com/org/frontend",
+                "default_branch": "main",
+                "description": "Frontend app",
+                "pushed_at": "2026-05-15T10:00:00Z",
+            },
+            {
+                "name": "backend",
+                "full_name": "org/backend",
+                "url": "https://github.com/org/backend",
+                "default_branch": "main",
+                "description": "Backend app",
+                "pushed_at": "2026-05-10T10:00:00Z",
+            },
+        ]
+
+    monkeypatch.setattr("tiller.setup_prompts.run_with_loading", fake_run_with_loading)
+
+    projects = asyncio.run(
+        collect_projects(
+            github_token="token",
+            github_payload={"enabled": True},
+            list_accessible_repos=lambda payload: [],
+        )
+    )
+
+    assert projects == {
+        "frontend": {
+            "url": "https://github.com/org/frontend",
+            "default_branch": "main",
+            "description": "Frontend app",
+        }
+    }
+
+
+
+def test_collect_github_config_supports_browser_auth_when_gh_is_available(monkeypatch) -> None:
+    monkeypatch.setattr("tiller.setup_prompts.detect_gh_cli", lambda: "/tmp/gh")
+    monkeypatch.setattr("tiller.setup_prompts.run_with_loading", lambda message, func, *args: asyncio.sleep(0, result=True))
+    login = Mock()
+    monkeypatch.setattr("tiller.setup_prompts.login_with_gh_cli", login)
+
+    install_questionary_stub(
+        monkeypatch,
+        select_answers=["browser"],
+        confirm_answers=[True],
+    )
+
+    github = asyncio.run(collect_github_config())
+
+    assert github["enabled"] is True
+    assert github["auth_method"] == "browser"
+    assert github["gh_path"] == "/tmp/gh"
+    login.assert_not_called()
+
+
+def test_collect_github_config_runs_login_when_not_authenticated(monkeypatch) -> None:
+    monkeypatch.setattr("tiller.setup_prompts.detect_gh_cli", lambda: "/tmp/gh")
+
+    responses = iter([False, True])
+
+    async def fake_run_with_loading(message, func, *args):
+        return next(responses)
+
+    login = Mock()
+    monkeypatch.setattr("tiller.setup_prompts.run_with_loading", fake_run_with_loading)
+    monkeypatch.setattr("tiller.setup_prompts.login_with_gh_cli", login)
+
+    install_questionary_stub(
+        monkeypatch,
+        select_answers=["browser"],
+        confirm_answers=[True],
+    )
+
+    github = asyncio.run(collect_github_config())
+
+    assert github["auth_method"] == "browser"
+    login.assert_called_once_with("/tmp/gh")
+
+
+    monkeypatch.setattr("tiller.setup_prompts.detect_gh_cli", lambda: None)
+
+    install_questionary_stub(
+        monkeypatch,
+        select_answers=["browser_disabled"],
+        confirm_answers=[True],
+    )
+
+    github = asyncio.run(collect_github_config())
+
+    assert github["enabled"] is True
+    assert github["auth_method"] == "token"
+    assert github["browser_auth_available"] is False
+    assert "gh_path" not in github
+
+
+def test_detect_gh_cli_prefers_environment_path(monkeypatch) -> None:
+    monkeypatch.setattr("tiller.setup_prompts.shutil.which", lambda command: "/usr/local/bin/gh" if command == "gh" else None)
+    assert detect_gh_cli() == "/usr/local/bin/gh"
+
+
+def test_ensure_gh_authentication_logs_in_when_needed(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class Completed:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = ""
+
+    def fake_run(command, capture_output=False, text=False, check=False, input=None):
+        calls.append(command)
+        if command[-2:] == ["auth", "status"] and len(calls) == 1:
+            return Completed(1)
+        if command[1:] == ["auth", "login", "--web", "--git-protocol", "https", "--skip-ssh-key"]:
+            assert input == "Y\n"
+            assert text is True
+            return Completed(0)
+        return Completed(0)
+
+    monkeypatch.setattr("tiller.setup_prompts.subprocess.run", fake_run)
+
+    ensure_gh_authentication("/tmp/gh")
+
+    assert calls == [
+        ["/tmp/gh", "auth", "status"],
+        ["/tmp/gh", "auth", "login", "--web", "--git-protocol", "https", "--skip-ssh-key"],
+        ["/tmp/gh", "auth", "status"],
+    ]
+
+
+def test_login_with_gh_cli_uses_non_interactive_flags(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class Completed:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+    def fake_run(command, input=None, text=False, check=False):
+        calls.append(command)
+        assert input == "Y\n"
+        assert text is True
+        return Completed(0)
+
+    monkeypatch.setattr("tiller.setup_prompts.subprocess.run", fake_run)
+
+    login_with_gh_cli("/tmp/gh")
+
+    assert calls == [["/tmp/gh", "auth", "login", "--web", "--git-protocol", "https", "--skip-ssh-key"]]
+
+
+def test_login_with_gh_cli_raises_on_login_failure(monkeypatch) -> None:
+    class Completed:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+    monkeypatch.setattr(
+        "tiller.setup_prompts.subprocess.run",
+        lambda command, input=None, text=False, check=False: Completed(1),
+    )
+
+    with pytest.raises(ValueError, match="Unable to authenticate with GitHub CLI"):
+        login_with_gh_cli("/tmp/gh")
+
+
+def test_is_gh_authenticated_returns_false_when_status_fails(monkeypatch) -> None:
+    class Completed:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = ""
+
+    monkeypatch.setattr(
+        "tiller.setup_prompts.subprocess.run",
+        lambda command, capture_output=False, text=False, check=False: Completed(1),
+    )
+
+    assert is_gh_authenticated("/tmp/gh") is False
+
+
+def test_github_config_resolve_token_uses_gh_for_browser_auth(monkeypatch) -> None:
+    class Completed:
+        def __init__(self, returncode: int, stdout: str) -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = ""
+
+    monkeypatch.delenv("GITHUB_API_TOKEN", raising=False)
+    monkeypatch.setattr("subprocess.run", lambda command, capture_output, text, check: Completed(0, "gh-token\n"))
+
+    config = GitHubConfig(enabled=True, auth_method="browser", gh_path="/tmp/gh")
+
+    assert config.resolve_token() == "gh-token"
 
 
 def test_collect_projects_shows_loading_during_validation(monkeypatch, capsys) -> None:
     install_questionary_stub(
         monkeypatch,
-        text_answers=["backend", "git@github.com:org/repo.git"],
+        text_answers=["backend", "", "git@github.com:org/repo.git"],
         confirm_answers=[True, False],
     )
 
@@ -94,6 +358,268 @@ def test_collect_projects_shows_loading_during_validation(monkeypatch, capsys) -
     output = capsys.readouterr().out
     assert "Validating repository access" in output
     assert "Detecting default branch" in output
+
+
+def test_collect_projects_hides_github_import_without_auth(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_choose_option(title: str, options, *, allow_skip: bool = False):
+        captured["title"] = title
+        captured["options"] = options
+        return "manual"
+
+    monkeypatch.setattr("tiller.setup_prompts.choose_option", fake_choose_option)
+    install_questionary_stub(
+        monkeypatch,
+        confirm_answers=[False],
+    )
+
+    projects = asyncio.run(
+        collect_projects(
+            None,
+            {"enabled": True, "auth_method": "token", "browser_auth_available": False},
+            list_accessible_repos=lambda payload: [_ for _ in ()],
+        )
+    )
+
+    assert projects == {}
+    assert captured["title"] == "How do you want to configure repositories?"
+    assert captured["options"] == [("manual", "Enter repositories manually")]
+
+
+def test_collect_projects_can_import_all_accessible_repos(monkeypatch) -> None:
+    install_questionary_stub(
+        monkeypatch,
+        select_answers=["all"],
+    )
+
+    projects = asyncio.run(
+        collect_projects(
+            "gh-token",
+            {"enabled": True},
+            list_accessible_repos=lambda payload: [
+                {
+                    "name": "frontend",
+                    "full_name": "org/frontend",
+                    "url": "https://github.com/org/frontend.git",
+                    "default_branch": "main",
+                    "description": "Frontend app",
+                },
+                {
+                    "name": "backend",
+                    "full_name": "org/backend",
+                    "url": "https://github.com/org/backend.git",
+                    "default_branch": "develop",
+                    "description": None,
+                },
+            ],
+        )
+    )
+
+    assert projects == {
+        "frontend": {
+            "url": "https://github.com/org/frontend.git",
+            "default_branch": "main",
+            "description": "Frontend app",
+        },
+        "backend": {
+            "url": "https://github.com/org/backend.git",
+            "default_branch": "develop",
+        },
+    }
+
+
+def test_collect_projects_uses_repo_name_when_importing_accessible_repos(monkeypatch) -> None:
+    install_questionary_stub(
+        monkeypatch,
+        select_answers=["all"],
+    )
+
+    projects = asyncio.run(
+        collect_projects(
+            "gh-token",
+            {"enabled": True},
+            list_accessible_repos=lambda payload: [
+                {
+                    "name": "payments-api",
+                    "full_name": "org/payments-api",
+                    "url": "https://github.com/org/payments-api.git",
+                    "default_branch": "main",
+                    "description": "Payments service",
+                }
+            ],
+        )
+    )
+
+    assert list(projects.keys()) == ["payments-api"]
+    assert projects["payments-api"]["description"] == "Payments service"
+
+
+def test_collect_projects_can_select_accessible_repos(monkeypatch) -> None:
+    selected = [
+        {
+            "name": "backend",
+            "full_name": "org/backend",
+            "url": "https://github.com/org/backend.git",
+            "default_branch": "main",
+            "description": "Backend service",
+        },
+        {
+            "name": "frontend",
+            "full_name": "org/frontend",
+            "url": "https://github.com/org/frontend.git",
+            "default_branch": "main",
+            "description": "Frontend app",
+        },
+    ]
+    install_questionary_stub(
+        monkeypatch,
+        select_answers=["select", "confirm"],
+        checkbox_answers=[selected],
+    )
+
+    projects = asyncio.run(
+        collect_projects(
+            "gh-token",
+            {"enabled": True},
+            list_accessible_repos=lambda payload: [
+                {
+                    "name": "frontend",
+                    "full_name": "org/frontend",
+                    "url": "https://github.com/org/frontend.git",
+                    "default_branch": "main",
+                    "description": "Frontend app",
+                },
+                {
+                    "name": "backend",
+                    "full_name": "org/backend",
+                    "url": "https://github.com/org/backend.git",
+                    "default_branch": "main",
+                    "description": "Backend service",
+                },
+            ],
+        )
+    )
+
+    assert list(projects.keys()) == ["backend", "frontend"]
+    assert projects["backend"]["description"] == "Backend service"
+    assert projects["frontend"]["description"] == "Frontend app"
+
+
+def test_collect_projects_allows_reviewing_checkbox_selection(monkeypatch) -> None:
+    first_selection = [
+        {
+            "name": "backend",
+            "full_name": "org/backend",
+            "url": "https://github.com/org/backend.git",
+            "default_branch": "main",
+            "description": "Backend service",
+        }
+    ]
+    final_selection = [
+        {
+            "name": "backend",
+            "full_name": "org/backend",
+            "url": "https://github.com/org/backend.git",
+            "default_branch": "main",
+            "description": "Backend service",
+        },
+        {
+            "name": "frontend",
+            "full_name": "org/frontend",
+            "url": "https://github.com/org/frontend.git",
+            "default_branch": "main",
+            "description": "Frontend app",
+        },
+    ]
+    install_questionary_stub(
+        monkeypatch,
+        select_answers=["select", "change", "confirm"],
+        checkbox_answers=[first_selection, final_selection],
+    )
+
+    projects = asyncio.run(
+        collect_projects(
+            "gh-token",
+            {"enabled": True},
+            list_accessible_repos=lambda payload: [
+                {
+                    "name": "frontend",
+                    "full_name": "org/frontend",
+                    "url": "https://github.com/org/frontend.git",
+                    "default_branch": "main",
+                    "description": "Frontend app",
+                },
+                {
+                    "name": "backend",
+                    "full_name": "org/backend",
+                    "url": "https://github.com/org/backend.git",
+                    "default_branch": "main",
+                    "description": "Backend service",
+                },
+            ],
+        )
+    )
+
+    assert list(projects.keys()) == ["backend", "frontend"]
+
+
+def test_list_accessible_github_repos_serializes_repos(monkeypatch) -> None:
+    repos = [
+        GitHubAccessibleRepo(
+            name="backend",
+            owner="org",
+            full_name="org/backend",
+            url="https://github.com/org/backend.git",
+            default_branch="main",
+            description="Backend service",
+            private=True,
+            pushed_at="2026-05-10T10:00:00Z",
+        ),
+        GitHubAccessibleRepo(
+            name="frontend",
+            owner="org",
+            full_name="org/frontend",
+            url="https://github.com/org/frontend.git",
+            default_branch="main",
+            description="Frontend app",
+            private=False,
+            pushed_at="2026-05-15T10:00:00Z",
+        ),
+    ]
+
+    class FakeClient:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        def list_accessible_repos(self):
+            return repos
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("tiller.setup.GitHubClient", FakeClient)
+
+    payload = _list_accessible_github_repos({"enabled": True, "token": "gh-token"})
+
+    assert payload == [
+        {
+            "name": "frontend",
+            "full_name": "org/frontend",
+            "url": "https://github.com/org/frontend.git",
+            "default_branch": "main",
+            "description": "Frontend app",
+            "pushed_at": "2026-05-15T10:00:00Z",
+        },
+        {
+            "name": "backend",
+            "full_name": "org/backend",
+            "url": "https://github.com/org/backend.git",
+            "default_branch": "main",
+            "description": "Backend service",
+            "pushed_at": "2026-05-10T10:00:00Z",
+        },
+    ]
 
 
 def test_detect_project_default_branch_parses_head_reference(monkeypatch) -> None:
@@ -275,9 +801,10 @@ session:
     assert (session_root / "events.jsonl").exists()
 
     session_payload = json.loads((session_root / "session.json").read_text(encoding="utf-8"))
+    assert session_payload["tracker_task_id"] == "1"
     assert session_payload["external_task_id"] == "1"
     assert session_payload["tracker_type"] == "memory"
-    assert session_payload["state"] == "stopped"
+    assert session_payload["state"] == "completed"
 
     task_payload = json.loads((session_root / "task.json").read_text(encoding="utf-8"))
     assert task_payload["id"] == "1"
@@ -408,7 +935,7 @@ session:
     record2, paths2, _ = asyncio.run(manager.prepare(tracker._tasks["1"], "stub"))
 
     assert record1.internal_task_id == record2.internal_task_id
-    assert record2.state == "stopped"
+    assert record2.state == "prepared"
     assert paths1.root == paths2.root
     assert paths2.state_md.read_text(encoding="utf-8") == "# STATE\n\ncustom state\n"
     assert "Updated body" in paths2.task_md.read_text(encoding="utf-8")
@@ -421,8 +948,8 @@ def test_render_agents_md_mcp_is_mcp_first() -> None:
     assert "Prefer the MCP tracker tools instead of local `tiller tracker ...` commands." in rendered
     assert "If a tracker operation is available through MCP, do not use the local `tiller tracker ...` CLI for that operation." in rendered
     assert "If a project operation is available through MCP, do not use the local `tiller project ...` CLI for that operation." in rendered
-    assert "Use the MCP GitHub tools for auth checks, repository checks, PR creation, and PR inspection." in rendered
-    assert "If a GitHub operation is available through MCP, do not use the local `tiller github ...` CLI for that operation." in rendered
+    assert "Use the MCP `create_pr` tool to open a pull request when it is available." not in rendered
+    assert "No PR tool is currently exposed in this session." in rendered
     assert "Use the MCP session tools to inspect the current session state and important paths." in rendered
     assert "If a session operation is available through MCP, do not use the local `tiller session ...` CLI for that operation." in rendered
     assert "In MCP mode, use local `tiller ...` CLI commands only when MCP fails for the operation you need." in rendered
@@ -433,14 +960,39 @@ def test_render_agents_md_cli_keeps_cli_instructions() -> None:
 
     assert "Use `tiller tracker get-task` to read the current task." in rendered
     assert "Use `tiller project use <name> --reason \"...\"` to provision a repo." in rendered
-    assert "Use `tiller github auth-status` if you need to confirm GitHub access before opening a PR." in rendered
+    assert "No PR command is currently exposed by Tiller in this environment." in rendered
     assert "Use `tiller session status` to inspect the current session state." in rendered
     assert "If a tracker operation is available through MCP" not in rendered
+
+
+def test_render_agents_md_mentions_branch_fallback_when_no_pr_tool() -> None:
+    from tiller.templates import render_agents_md
+
+    rendered = render_agents_md(tool_transport="cli", pr_tool_enabled=False)
+
+    assert "No PR command is currently exposed by Tiller in this environment." in rendered
+    assert "push the branch and report the branch link(s) to the user" in rendered
 
 
 def test_build_tracker_server_includes_cli_parity_tools(tmp_path: Path) -> None:
     session_root = tmp_path / "session"
     session_root.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tiller.yaml").write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+agent:
+  default: stub
+github:
+  enabled: true
+  token: yaml-token
+projects: {}
+session:
+  base_path: %s
+""" % tmp_path.as_posix(),
+        encoding="utf-8",
+    )
     (session_root / "session.json").write_text(
         json.dumps(
             {
@@ -469,14 +1021,104 @@ def test_build_tracker_server_includes_cli_parity_tools(tmp_path: Path) -> None:
         "project_list",
         "project_status",
         "project_use",
-        "github_auth_status",
-        "github_repo_status",
-        "github_create_pr",
-        "github_pr_view",
+        "create_pr",
         "session_status",
         "session_paths",
     } <= tool_names
+    assert "github_create_pr" not in tool_names
+    assert "github_auth_status" not in tool_names
+    assert "github_repo_status" not in tool_names
+    assert "github_pr_view" not in tool_names
 
+
+def test_get_pull_request_provider_returns_github_binding_when_enabled() -> None:
+    config = type(
+        "Config",
+        (),
+        {
+            "github": GitHubConfig(enabled=True, token="yaml-token"),
+        },
+    )()
+
+    binding = get_pull_request_provider(config)
+
+    assert binding is not None
+    assert binding.name == "github"
+    assert isinstance(binding.provider, GitHubPullRequestProvider)
+
+
+def test_get_pull_request_provider_returns_none_when_unconfigured() -> None:
+    config = type(
+        "Config",
+        (),
+        {
+            "github": GitHubConfig(enabled=False),
+        },
+    )()
+
+    assert get_pull_request_provider(config) is None
+
+
+def test_build_parser_hides_pr_command_without_provider(tmp_path: Path) -> None:
+    from tiller.cli import build_parser
+
+    config_path = tmp_path / "tiller.yaml"
+    config_path.write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+agent:
+  default: stub
+projects: {}
+session:
+  base_path: %s
+""" % tmp_path.as_posix(),
+        encoding="utf-8",
+    )
+
+    parser = build_parser(str(config_path))
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["pr", "create", "--repo", "backend", "--title", "feat: test"])
+
+
+def test_build_tracker_server_hides_create_pr_without_provider(tmp_path: Path) -> None:
+    session_root = tmp_path / "session-no-pr"
+    session_root.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tiller-no-pr.yaml").write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+agent:
+  default: stub
+projects: {}
+session:
+  base_path: %s
+""" % tmp_path.as_posix(),
+        encoding="utf-8",
+    )
+    (session_root / "session.json").write_text(
+        json.dumps(
+            {
+                "internal_task_id": "TASK-124",
+                "tracker_task_id": "2",
+                "agent_name": "stub",
+                "workspace": str(session_root),
+                "config_path": str(tmp_path / "tiller-no-pr.yaml"),
+                "state": "running",
+                "provisioned_repos": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_root / "projects.json").write_text("{}", encoding="utf-8")
+
+    server = build_tracker_server(session_root)
+    tool_names = {tool.name for tool in server._tool_manager.list_tools()}
+
+    assert "create_pr" not in tool_names
 
 def test_build_tracker_server_does_not_expose_memory_tools(tmp_path: Path) -> None:
     session_root = tmp_path / "session-mcp-memory"
@@ -632,6 +1274,7 @@ def test_telegram_tracker_creates_task_comments_and_rotates_on_new(tmp_path: Pat
         def __init__(self, updates: list[dict[str, object]]) -> None:
             self.updates = updates
             self.sent_messages: list[dict[str, object]] = []
+            self.command_registrations: list[dict[str, object]] = []
             self.base_url = "https://api.telegram.org/bottoken"
 
         async def get(self, path: str, params=None):
@@ -644,6 +1287,9 @@ def test_telegram_tracker_creates_task_comments_and_rotates_on_new(tmp_path: Pat
             raise AssertionError(f"unexpected path: {path}")
 
         async def post(self, path: str, json=None):
+            if path == "/setMyCommands":
+                self.command_registrations.append(dict(json or {}))
+                return FakeResponse({"ok": True, "result": True})
             if path != "/sendMessage":
                 raise AssertionError(f"unexpected path: {path}")
             self.sent_messages.append(dict(json or {}))
@@ -729,7 +1375,16 @@ def test_telegram_tracker_creates_task_comments_and_rotates_on_new(tmp_path: Pat
         ]
     )  # type: ignore[assignment]
 
+    asyncio.run(adapter.validate())
     tasks = asyncio.run(adapter.list_tasks("new"))
+    assert adapter._client.command_registrations == [
+        {
+            "commands": [
+                {"command": "start", "description": "Show bot instructions"},
+                {"command": "new", "description": "Create a new task"},
+            ]
+        }
+    ]
     assert [task.id for task in tasks] == ["telegram-1", "telegram-2"]
     assert tasks[0].title == "primeira task"
     assert [comment.body for comment in tasks[0].comments] == ["primeira task", "detalhe adicional"]
@@ -1333,6 +1988,130 @@ def test_github_client_reports_invalid_token_clearly(monkeypatch) -> None:
         client.close()
 
 
+def test_discover_local_projects_from_repo_store(tmp_path: Path, monkeypatch) -> None:
+    mirrors = tmp_path / "repo-mirrors"
+    backend = mirrors / "backend"
+    backend_git = backend / ".git"
+    backend_git.mkdir(parents=True, exist_ok=True)
+    notes = mirrors / "notes"
+    notes.mkdir(parents=True, exist_ok=True)
+
+    class Completed:
+        def __init__(self, returncode: int, stdout: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(command, cwd, capture_output, text):
+        assert cwd == backend
+        assert capture_output is True
+        assert text is True
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return Completed(0, "git@internal.example.com:core/backend.git\n")
+        if command == ["git", "symbolic-ref", "--short", "HEAD"]:
+            return Completed(0, "develop\n")
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr("tiller.repo_seed.subprocess.run", fake_run)
+
+    projects = discover_local_projects(mirrors)
+
+    assert list(projects.keys()) == ["backend"]
+    backend_project = projects["backend"]
+    assert backend_project.url == "git@internal.example.com:core/backend.git"
+    assert backend_project.default_branch == "develop"
+    assert backend_project.source == "local_directory"
+    assert backend_project.source_path == str(backend)
+
+
+def test_load_config_merges_local_repo_store_projects(tmp_path: Path, monkeypatch) -> None:
+    repo_store = tmp_path / "repo-mirrors"
+    backend = repo_store / "backend"
+    backend_git = backend / ".git"
+    backend_git.mkdir(parents=True, exist_ok=True)
+
+    class Completed:
+        def __init__(self, returncode: int, stdout: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(command, cwd, capture_output, text):
+        if cwd == backend and command == ["git", "config", "--get", "remote.origin.url"]:
+            return Completed(0, "git@internal.example.com:core/backend.git\n")
+        if cwd == backend and command == ["git", "symbolic-ref", "--short", "HEAD"]:
+            return Completed(0, "main\n")
+        raise AssertionError(f"Unexpected command: {command} cwd={cwd}")
+
+    monkeypatch.setattr("tiller.repo_seed.subprocess.run", fake_run)
+
+    config_path = tmp_path / "tiller.yaml"
+    config_path.write_text(
+        f"""
+tracker:
+  type: clickup
+  token: clickup-token
+  team_id: team-1
+  trigger_status: DEVELOP
+agent:
+  default: codex
+projects:
+  frontend:
+    url: https://github.com/org/frontend
+    description: Frontend app
+session:
+  base_path: {tmp_path / 'sessions'}
+  repo_store_path: {repo_store}
+""",
+        encoding="utf-8",
+    )
+
+    loaded = load_config(config_path)
+
+    assert loaded.session.repo_store_path == repo_store.resolve()
+    assert set(loaded.projects.keys()) == {"frontend", "backend"}
+    assert loaded.projects["backend"].source == "local_directory"
+    assert loaded.projects["backend"].source_path == str(backend)
+    assert loaded.projects["frontend"].source == "configured"
+
+
+def test_repo_seed_manager_uses_local_directory_source_without_git_fetch(tmp_path: Path) -> None:
+    source_repo = tmp_path / "repo-mirrors" / "backend"
+    (source_repo / ".git").mkdir(parents=True, exist_ok=True)
+    (source_repo / "README.md").write_text("backend\n", encoding="utf-8")
+
+    manager = RepoSeedManager(tmp_path, mirrors_dir=tmp_path / "repo-mirrors")
+    project = ProjectSpec(
+        name="backend",
+        url="file:///ignored",
+        default_branch="main",
+        source="local_directory",
+        source_path=str(source_repo),
+    )
+    paths = SessionPaths(
+        root=tmp_path / "session",
+        agents_md=tmp_path / "session" / "AGENTS.md",
+        task_md=tmp_path / "session" / "TASK.md",
+        task_json=tmp_path / "session" / "task.json",
+        state_md=tmp_path / "session" / "STATE.md",
+        projects_json=tmp_path / "session" / "projects.json",
+        repos_dir=tmp_path / "session" / "repos",
+        attachments_dir=tmp_path / "session" / "attachments",
+        mcp_dir=tmp_path / "session" / ".mcp",
+        mcp_config=tmp_path / "session" / ".mcp" / "config.json",
+        state_json=tmp_path / "session" / "session.json",
+    )
+    paths.repos_dir.mkdir(parents=True, exist_ok=True)
+
+    repo_path = manager.provision(paths=paths, project=project)
+
+    assert repo_path == paths.repos_dir / "backend"
+    assert (repo_path / "README.md").read_text(encoding="utf-8") == "backend\n"
+    metadata = json.loads((repo_path / ".tiller-repo.json").read_text(encoding="utf-8"))
+    assert metadata["seed"] == str(source_repo)
+
+
+
 def test_repo_seed_manager_writes_repo_metadata(tmp_path: Path) -> None:
     manager = RepoSeedManager(tmp_path)
     project = ProjectSpec(name="demo", url="https://github.com/org/demo", default_branch="main")
@@ -1374,8 +2153,8 @@ def test_repo_seed_manager_writes_repo_metadata(tmp_path: Path) -> None:
     assert any(command[:2] == ["git", "checkout"] and command[-1] == "main" for command, _ in commands)
     assert any(command[:3] == ["git", "reset", "--hard"] and command[-1] == "origin/main" for command, _ in commands)
 
+    shutil.rmtree(tmp_path / "repo-mirrors" / "demo")
 
-def test_repo_seed_manager_falls_back_from_http_to_ssh(tmp_path: Path) -> None:
     manager = RepoSeedManager(tmp_path)
     project = ProjectSpec(name="demo", url="https://github.com/org/demo.git", default_branch="main")
 
@@ -1486,6 +2265,76 @@ def test_session_cleanup_removes_provisioned_worktrees_before_workspace(tmp_path
     assert not paths.root.exists()
 
 
+def test_project_status_reports_local_project_metadata(tmp_path: Path, monkeypatch) -> None:
+    from tiller.operations import SessionOperations
+
+    session_root = tmp_path / "session"
+    session_root.mkdir(parents=True, exist_ok=True)
+    config_path = tmp_path / "tiller.yaml"
+    config_path.write_text(
+        f"""
+tracker:
+  type: clickup
+  token: clickup-token
+  team_id: team-1
+  trigger_status: DEVELOP
+agent:
+  default: stub
+session:
+  base_path: {tmp_path / 'sessions'}
+  repo_store_path: {tmp_path / 'repo-mirrors'}
+""",
+        encoding="utf-8",
+    )
+    (session_root / "session.json").write_text(
+        json.dumps(
+            {
+                "internal_task_id": "TASK-123",
+                "tracker_task_id": "1",
+                "agent_name": "stub",
+                "workspace": str(session_root),
+                "config_path": str(config_path),
+                "state": "running",
+                "provisioned_repos": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_root / "projects.json").write_text(
+        json.dumps(
+            {
+                "backend": {
+                    "url": "git@internal.example.com:core/backend.git",
+                    "default_branch": "develop",
+                    "description": "Backend service",
+                    "source": "local_directory",
+                    "source_path": str(tmp_path / "repo-mirrors" / "backend"),
+                    "repo_path": "repos/backend",
+                    "provision_method": "seed_copy",
+                    "available": True,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = SessionOperations(session_root).project_status()
+
+    assert status == [
+        {
+            "name": "backend",
+            "path": str(session_root / "repos/backend"),
+            "provisioned": False,
+            "available": True,
+            "url": "git@internal.example.com:core/backend.git",
+            "default_branch": "develop",
+            "description": "Backend service",
+            "source": "local_directory",
+            "source_path": str(tmp_path / "repo-mirrors" / "backend"),
+        }
+    ]
+
+
 def test_handle_tracker_command_closes_tracker(tmp_path: Path, monkeypatch, capsys) -> None:
     from tiller.commands import handle_session_command
 
@@ -1594,64 +2443,6 @@ session:
 
     assert exit_code == 0
     assert output == {"task_id": "9", "statuses": ["Backlog", "In Progress", "Done"]}
-
-
-def test_handle_github_auth_status_uses_yaml_token(tmp_path: Path, monkeypatch, capsys) -> None:
-    from tiller.commands import handle_session_command
-
-    session_root = tmp_path / "session"
-    session_root.mkdir(parents=True, exist_ok=True)
-    (session_root / "session.json").write_text(
-        json.dumps(
-            {
-                "internal_task_id": "TASK-123",
-                "tracker_task_id": "1",
-                "agent_name": "stub",
-                "workspace": str(session_root),
-                "config_path": str(tmp_path / "tiller.yaml"),
-                "state": "running",
-                "provisioned_repos": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (session_root / "projects.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "tiller.yaml").write_text(
-        """
-tracker:
-  type: memory
-  trigger_status: in_development
-agent:
-  default: stub
-github:
-  enabled: true
-  token: yaml-token
-projects: {}
-session:
-  base_path: %s
-""" % tmp_path.as_posix(),
-        encoding="utf-8",
-    )
-
-    class StubGitHubClient:
-        def __init__(self, config) -> None:
-            assert config.resolve_token() == "yaml-token"
-
-        def auth_status(self) -> dict[str, object]:
-            return {"authenticated": True, "login": "octocat"}
-
-        def close(self) -> None:
-            return None
-
-    monkeypatch.setattr("tiller.commands.GitHubClient", StubGitHubClient)
-    exit_code = handle_session_command(
-        __import__("argparse").Namespace(command="github", github_command="auth-status", session=str(session_root))
-    )
-    output = json.loads(capsys.readouterr().out)
-
-    assert exit_code == 0
-    assert output["authenticated"] is True
-    assert output["login"] == "octocat"
 
 
 def test_memory_provider_retain_recall(tmp_path: Path) -> None:
@@ -1778,6 +2569,28 @@ def test_hindsight_memory_provider_uses_embedded_client(monkeypatch, tmp_path: P
 
 
 
+def test_load_config_persists_resolved_config_path(tmp_path: Path) -> None:
+    config_path = tmp_path / "nested" / "custom-tiller.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+agent:
+  default: stub
+projects: {}
+session:
+  base_path: %s
+""" % tmp_path.as_posix(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.config_path == config_path.resolve()
+
+
 def test_load_session_context_accepts_external_task_id_fallback(tmp_path: Path) -> None:
     from tiller.runtime import load_session_context
 
@@ -1840,6 +2653,56 @@ def test_build_tracker_server_accepts_external_task_id_fallback(tmp_path: Path) 
 
     assert server is not None
 
+
+
+def test_service_reconciles_orphaned_running_session(tmp_path: Path) -> None:
+    config_path = tmp_path / "tiller.yaml"
+    config_path.write_text(
+        """
+tracker:
+  type: memory
+  trigger_status: in_development
+agent:
+  default: stub
+projects: {}
+session:
+  base_path: %s
+  keep_finished_sessions: true
+""" % tmp_path.as_posix(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+    tracker = InMemoryTrackerAdapter([])
+    service = TillerService(config=config, tracker=tracker, harness=AgentHarness({"stub": StubAdapter()}))
+
+    session_root = config.session.base_path / "TASK-ORPHAN"
+    session_root.mkdir(parents=True, exist_ok=True)
+    (session_root / "session.json").write_text(
+        json.dumps(
+            {
+                "internal_task_id": "TASK-ORPHAN",
+                "tracker_task_id": "task-1",
+                "external_task_id": "task-1",
+                "tracker_type": "memory",
+                "agent_name": "stub",
+                "workspace": str(session_root),
+                "config_path": str(config_path.resolve()),
+                "state": "running",
+                "process_id": 999999,
+                "provisioned_repos": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    asyncio.run(service.reconcile_orphaned_sessions())
+
+    payload = json.loads((session_root / "session.json").read_text(encoding="utf-8"))
+    assert payload["state"] == "interrupted"
+    assert payload["process_id"] is None
+    events = [json.loads(line) for line in (session_root / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(event["type"] == "session_interrupted" for event in events)
 
 
 def test_session_memory_service_builds_langmem_provider(monkeypatch, tmp_path: Path) -> None:
@@ -2069,7 +2932,7 @@ session:
     assert output == expected
 
 
-def test_handle_github_create_pr_reads_repo_metadata(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_handle_create_pr_reads_repo_metadata(tmp_path: Path, monkeypatch, capsys) -> None:
     from tiller.commands import handle_session_command
 
     session_root = tmp_path / "session"
@@ -2152,11 +3015,11 @@ session:
         def close(self) -> None:
             return None
 
-    monkeypatch.setattr("tiller.commands.GitHubClient", StubGitHubClient)
+    monkeypatch.setattr("tiller.pr_providers.GitHubClient", StubGitHubClient)
     exit_code = handle_session_command(
         __import__("argparse").Namespace(
-            command="github",
-            github_command="create-pr",
+            command="pr",
+            pr_command="create",
             repo="backend",
             title="feat: test",
             body=None,
@@ -2171,6 +3034,7 @@ session:
     assert exit_code == 0
     assert output["number"] == 7
     assert output["html_url"] == "https://github.com/org/backend/pull/7"
+    assert output["provider"] == "github"
 
 
 
@@ -2584,15 +3448,19 @@ def test_run_setup_writes_guided_config(tmp_path: Path, monkeypatch) -> None:
             "tag": "backend",
         }
 
-    validated_urls: list[tuple[str, object]] = []
-    detected_default_branches: list[tuple[str, object]] = []
+    repo_payload_calls: list[dict[str, object]] = []
 
-    def fake_validate_project_clone_url(url: str, github_token) -> None:
-        validated_urls.append((url, github_token))
-
-    def fake_detect_project_default_branch(url: str, github_token) -> str:
-        detected_default_branches.append((url, github_token))
-        return "main"
+    def fake_list_accessible_github_repos(github_payload: dict[str, object]) -> list[dict[str, object]]:
+        repo_payload_calls.append(github_payload)
+        return [
+            {
+                "name": "frontend",
+                "full_name": "org/frontend",
+                "url": "https://github.com/org/frontend.git",
+                "default_branch": "main",
+                "description": "Frontend app",
+            }
+        ]
 
     monkeypatch.setattr("tiller.setup_clickup.ClickUpSetupProvider.collect", fake_collect_clickup_setup)
     monkeypatch.setattr(
@@ -2604,15 +3472,14 @@ def test_run_setup_writes_guided_config(tmp_path: Path, monkeypatch) -> None:
             }
         ),
     )
-    monkeypatch.setattr("tiller.setup.validate_project_clone_url", fake_validate_project_clone_url)
-    monkeypatch.setattr("tiller.setup.detect_project_default_branch", fake_detect_project_default_branch)
+    monkeypatch.setattr("tiller.setup._list_accessible_github_repos", fake_list_accessible_github_repos)
 
     install_questionary_stub(
         monkeypatch,
-        select_answers=["codex", "clickup"],
-        text_answers=["gpt-5", "frontend", "https://github.com/org/frontend"],
+        select_answers=["codex", "clickup", "token", "all"],
+        text_answers=["gpt-5"],
         password_answers=["yaml-github-token"],
-        confirm_answers=[True, True, False, False],
+        confirm_answers=[True],
     )
 
     exit_code = asyncio.run(run_setup(str(config_path)))
@@ -2628,11 +3495,9 @@ def test_run_setup_writes_guided_config(tmp_path: Path, monkeypatch) -> None:
     assert "token: yaml-github-token" in rendered
     assert "token_env: GITHUB_API_TOKEN" in rendered
     assert "frontend:" in rendered
-    assert "url: https://github.com/org/frontend" in rendered
-    assert validated_urls and validated_urls[0][0] == "https://github.com/org/frontend"
-    assert validated_urls[0][1] == "yaml-github-token"
-    assert detected_default_branches and detected_default_branches[0][0] == "https://github.com/org/frontend"
-    assert detected_default_branches[0][1] == "yaml-github-token"
+    assert "description: Frontend app" in rendered
+    assert "url: https://github.com/org/frontend.git" in rendered
+    assert repo_payload_calls and repo_payload_calls[0]["token"] == "yaml-github-token"
 
     loaded = load_config(config_path)
     assert loaded.agent.default == "codex"
@@ -2640,6 +3505,7 @@ def test_run_setup_writes_guided_config(tmp_path: Path, monkeypatch) -> None:
     assert loaded.tracker.options["team_id"] == "team-1"
     assert loaded.tracker.options["assignee"] == "user-1"
     assert loaded.github.token == "yaml-github-token"
+    assert loaded.projects["frontend"].description == "Frontend app"
     assert loaded.session.base_path == Path("~/.tiller/sessions").expanduser().resolve()
     assert loaded.session.cleanup_after_hours == 24
     assert loaded.session.keep_finished_sessions is True
@@ -2659,15 +3525,19 @@ def test_run_setup_writes_guided_config_for_telegram(tmp_path: Path, monkeypatch
             "poll_interval": 5,
         }
 
-    validated_urls: list[tuple[str, object]] = []
-    detected_default_branches: list[tuple[str, object]] = []
+    repo_payload_calls: list[dict[str, object]] = []
 
-    def fake_validate_project_clone_url(url: str, github_token) -> None:
-        validated_urls.append((url, github_token))
-
-    def fake_detect_project_default_branch(url: str, github_token) -> str:
-        detected_default_branches.append((url, github_token))
-        return "main"
+    def fake_list_accessible_github_repos(github_payload: dict[str, object]) -> list[dict[str, object]]:
+        repo_payload_calls.append(github_payload)
+        return [
+            {
+                "name": "backend",
+                "full_name": "org/backend",
+                "url": "https://github.com/org/backend.git",
+                "default_branch": "develop",
+                "description": "Backend service",
+            }
+        ]
 
     monkeypatch.setattr("tiller.setup_telegram.TelegramSetupProvider.collect", fake_collect_telegram_setup)
     monkeypatch.setattr(
@@ -2679,15 +3549,14 @@ def test_run_setup_writes_guided_config_for_telegram(tmp_path: Path, monkeypatch
             }
         ),
     )
-    monkeypatch.setattr("tiller.setup.validate_project_clone_url", fake_validate_project_clone_url)
-    monkeypatch.setattr("tiller.setup.detect_project_default_branch", fake_detect_project_default_branch)
+    monkeypatch.setattr("tiller.setup._list_accessible_github_repos", fake_list_accessible_github_repos)
 
     install_questionary_stub(
         monkeypatch,
-        select_answers=["codex", "telegram"],
-        text_answers=["gpt-5", "backend", "https://github.com/org/backend"],
+        select_answers=["codex", "telegram", "token", "all"],
+        text_answers=["gpt-5"],
         password_answers=["yaml-github-token"],
-        confirm_answers=[True, True, False, False],
+        confirm_answers=[True],
     )
 
     exit_code = asyncio.run(run_setup(str(config_path)))
@@ -2705,10 +3574,9 @@ def test_run_setup_writes_guided_config_for_telegram(tmp_path: Path, monkeypatch
     assert "trigger_status: new" in rendered
     assert "poll_interval: 5" in rendered
     assert "token: yaml-github-token" in rendered
-    assert validated_urls and validated_urls[0][0] == "https://github.com/org/backend"
-    assert validated_urls[0][1] == "yaml-github-token"
-    assert detected_default_branches and detected_default_branches[0][0] == "https://github.com/org/backend"
-    assert detected_default_branches[0][1] == "yaml-github-token"
+    assert "backend:" in rendered
+    assert "description: Backend service" in rendered
+    assert repo_payload_calls and repo_payload_calls[0]["token"] == "yaml-github-token"
 
     loaded = load_config(config_path)
     assert loaded.agent.default == "codex"
@@ -2719,6 +3587,7 @@ def test_run_setup_writes_guided_config_for_telegram(tmp_path: Path, monkeypatch
     assert loaded.tracker.options["allowed_chat_ids"] == ["-1001234567890"]
     assert loaded.tracker.options["allowed_user_ids"] == ["111", "222"]
     assert loaded.github.token == "yaml-github-token"
+    assert loaded.projects["backend"].description == "Backend service"
 
 
 def test_telegram_setup_provider_collects_filters(monkeypatch) -> None:
@@ -2727,9 +3596,6 @@ def test_telegram_setup_provider_collects_filters(monkeypatch) -> None:
     install_questionary_stub(
         monkeypatch,
         text_answers=[
-            "~/.tiller/custom-telegram-state.json",
-            "new",
-            "5",
             "-1001234567890, -1009999999999",
             "111, 222",
         ],
@@ -2742,7 +3608,7 @@ def test_telegram_setup_provider_collects_filters(monkeypatch) -> None:
     assert tracker == {
         "type": "telegram",
         "bot_token": "telegram-secret-token",
-        "state_path": "~/.tiller/custom-telegram-state.json",
+        "state_path": "~/.tiller/telegram-state.json",
         "trigger_status": "new",
         "poll_interval": 5,
         "allowed_chat_ids": ["-1001234567890", "-1009999999999"],
@@ -2778,8 +3644,8 @@ def test_run_setup_fails_early_when_project_clone_validation_fails(tmp_path: Pat
 
     install_questionary_stub(
         monkeypatch,
-        select_answers=["codex", "clickup"],
-        text_answers=["gpt-5", "frontend", "https://github.com/org/frontend"],
+        select_answers=["codex", "clickup", "token", "manual"],
+        text_answers=["gpt-5", "frontend", "", "https://github.com/org/frontend"],
         password_answers=["yaml-github-token"],
         confirm_answers=[True, True],
     )

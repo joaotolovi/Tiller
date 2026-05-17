@@ -51,7 +51,7 @@ class TaskRuntime:
         self.session_manager.workspace_repo.save_session(
             SessionState(
                 internal_task_id=record.internal_task_id,
-                external_task_id=record.tracker_task_id,
+                tracker_task_id=record.tracker_task_id,
                 tracker_type=self.config.tracker.type,
                 workspace=workspace,
                 state="running",
@@ -75,11 +75,11 @@ class TaskRuntime:
 
     async def finalize_session(self, *, task: Task, record: SessionRecord, workspace: Path, exit_code: int) -> str:
         now = self._now()
-        state = "stopped"
+        state = "completed" if exit_code == 0 else "failed"
         self.session_manager.workspace_repo.save_session(
             SessionState(
                 internal_task_id=record.internal_task_id,
-                external_task_id=record.tracker_task_id,
+                tracker_task_id=record.tracker_task_id,
                 tracker_type=self.config.tracker.type,
                 workspace=workspace,
                 state=state,

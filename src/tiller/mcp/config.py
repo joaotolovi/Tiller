@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +21,7 @@ def build_github_mcp_server(config: TillerConfig) -> dict[str, Any] | None:
     if not config.github.enabled:
         return None
 
-    token = config.github.token or os.environ.get(config.github.token_env)
+    token = config.github.resolve_token()
     if not token:
         return None
 

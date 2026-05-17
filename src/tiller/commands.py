@@ -4,11 +4,14 @@ import argparse
 import json
 from pathlib import Path
 
-from . import operations as operations_module
-from .operations import GitHubClient, SessionOperations
+from .operations import SessionOperations
 
 
-def register_session_subcommands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+def register_session_subcommands(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+    *,
+    pr_provider_enabled: bool = True,
+) -> None:
     tracker_parser = subparsers.add_parser("tracker", help="Interact with the current session tracker task")
     tracker_parser.add_argument("tracker_command", choices=["get-task", "comment", "set-status", "status-options", "download-attachments"])
     tracker_parser.add_argument("value", nargs="?")
@@ -21,29 +24,18 @@ def register_session_subcommands(subparsers: argparse._SubParsersAction[argparse
     project_parser.add_argument("--reason", dest="reason", default=None)
     project_parser.add_argument("--session", dest="session", default=None)
 
-    github_parser = subparsers.add_parser("github", help="Interact with GitHub for the current session")
-    github_subparsers = github_parser.add_subparsers(dest="github_command", required=True)
+    pr_parser = subparsers.add_parser("pr", help="Interact with pull requests for the current session")
+    pr_subparsers = pr_parser.add_subparsers(dest="pr_command", required=True)
 
-    github_auth = github_subparsers.add_parser("auth-status", help="Check GitHub authentication")
-    github_auth.add_argument("--session", dest="session", default=None)
-
-    github_repo = github_subparsers.add_parser("repo-status", help="Inspect the GitHub repository for a project")
-    github_repo.add_argument("repo")
-    github_repo.add_argument("--session", dest="session", default=None)
-
-    github_pr_create = github_subparsers.add_parser("create-pr", help="Create a pull request for a provisioned project")
-    github_pr_create.add_argument("--repo", required=True)
-    github_pr_create.add_argument("--title", required=True)
-    github_pr_create.add_argument("--body", dest="body", default=None)
-    github_pr_create.add_argument("--body-file", dest="body_file", default=None)
-    github_pr_create.add_argument("--base", dest="base", default=None)
-    github_pr_create.add_argument("--head", dest="head", default=None)
-    github_pr_create.add_argument("--session", dest="session", default=None)
-
-    github_pr_view = github_subparsers.add_parser("pr-view", help="View a pull request for a project")
-    github_pr_view.add_argument("--repo", required=True)
-    github_pr_view.add_argument("--number", required=True, type=int)
-    github_pr_view.add_argument("--session", dest="session", default=None)
+    if pr_provider_enabled:
+        pr_create = pr_subparsers.add_parser("create", help="Create a pull request for a provisioned project")
+        pr_create.add_argument("--repo", required=True)
+        pr_create.add_argument("--title", required=True)
+        pr_create.add_argument("--body", dest="body", default=None)
+        pr_create.add_argument("--body-file", dest="body_file", default=None)
+        pr_create.add_argument("--base", dest="base", default=None)
+        pr_create.add_argument("--head", dest="head", default=None)
+        pr_create.add_argument("--session", dest="session", default=None)
 
     session_parser = subparsers.add_parser("session", help="Inspect current session state")
     session_parser.add_argument("session_command", choices=["status", "paths"])
@@ -51,15 +43,14 @@ def register_session_subcommands(subparsers: argparse._SubParsersAction[argparse
 
 
 def handle_session_command(args: argparse.Namespace) -> int:
-    operations_module.GitHubClient = GitHubClient
     operations = SessionOperations(getattr(args, "session", None))
 
     if args.command == "tracker":
         return _print_payload(_handle_tracker_command(args, operations))
     if args.command == "project":
         return _print_payload(_handle_project_command(args, operations))
-    if args.command == "github":
-        return _print_payload(_handle_github_command(args, operations))
+    if args.command == "pr":
+        return _print_payload(_handle_pr_command(args, operations))
     if args.command == "session":
         return _print_payload(_handle_session_info_command(args, operations))
     raise ValueError(f"Unsupported session command: {args.command}")
@@ -103,16 +94,10 @@ def _handle_project_command(args: argparse.Namespace, operations: SessionOperati
     raise ValueError(f"Unsupported project command: {args.project_command}")
 
 
-def _handle_github_command(args: argparse.Namespace, operations: SessionOperations):
-    if args.github_command == "auth-status":
-        return operations.github_auth_status()
-
-    if args.github_command == "repo-status":
-        return operations.github_repo_status(args.repo)
-
-    if args.github_command == "create-pr":
+def _handle_pr_command(args: argparse.Namespace, operations: SessionOperations):
+    if args.pr_command == "create":
         body = _read_pr_body(args.body, args.body_file)
-        return operations.github_create_pr(
+        return operations.create_pr(
             repo_name=args.repo,
             title=args.title,
             body=body,
@@ -120,10 +105,7 @@ def _handle_github_command(args: argparse.Namespace, operations: SessionOperatio
             head=args.head,
         )
 
-    if args.github_command == "pr-view":
-        return operations.github_pr_view(repo_name=args.repo, number=args.number)
-
-    raise ValueError(f"Unsupported github command: {args.github_command}")
+    raise ValueError(f"Unsupported pr command: {args.pr_command}")
 
 
 def _handle_session_info_command(args: argparse.Namespace, operations: SessionOperations):

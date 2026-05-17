@@ -27,6 +27,8 @@ if ([string]::IsNullOrWhiteSpace($LogDir)) {
 
 $ConfigDir = Split-Path -Parent $ConfigPath
 $ArchiveUrl = "https://codeload.github.com/$RepoOwner/$RepoName/zip/refs/heads/$RepoRef"
+$GhVersion = if ($env:TILLER_GH_VERSION) { $env:TILLER_GH_VERSION } else { "2.92.0" }
+$TillerBinDir = if ($env:TILLER_BIN_DIR) { $env:TILLER_BIN_DIR } else { Join-Path $InstallDir "bin" }
 
 function Write-Info($Message)    { Write-Host "[tiller-install] $Message" -ForegroundColor Cyan }
 function Write-Success($Message) { Write-Host "[tiller-install] $Message" -ForegroundColor Green }
@@ -92,6 +94,51 @@ function Get-UvPath {
     Invoke-Die "uv installation finished but binary was not found."
 }
 
+function Get-GhPath {
+    $found = Get-Command gh -ErrorAction SilentlyContinue
+    if ($found) {
+        Write-Info "Found gh at $($found.Source)"
+        return $found.Source
+    }
+
+    $bundled = Join-Path $TillerBinDir "gh.exe"
+    if (Test-Path $bundled) {
+        $env:PATH = "$TillerBinDir;$env:PATH"
+        Write-Info "Found gh at $bundled"
+        return $bundled
+    }
+
+    $arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "386" }
+    $archiveName = "gh_${GhVersion}_windows_${arch}.zip"
+    $downloadUrl = "https://github.com/cli/cli/releases/download/v$GhVersion/$archiveName"
+    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("tiller-gh-" + [guid]::NewGuid())
+    $zipPath = Join-Path $tmpDir $archiveName
+    $extractPath = Join-Path $tmpDir "extract"
+    New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $extractPath | Out-Null
+    New-Item -ItemType Directory -Force -Path $TillerBinDir | Out-Null
+
+    try {
+        Write-Info "Installing GitHub CLI locally..."
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
+        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+        $candidate = Join-Path $extractPath "gh_${GhVersion}_windows_${arch}\bin\gh.exe"
+        if (-not (Test-Path $candidate)) {
+            Write-Warn "Downloaded GitHub CLI archive did not contain expected gh.exe binary"
+            return $null
+        }
+        Copy-Item -Path $candidate -Destination $bundled -Force
+        $env:PATH = "$TillerBinDir;$env:PATH"
+        Write-Success "Installed gh at $bundled"
+        return $bundled
+    } catch {
+        Write-Warn "Could not install GitHub CLI automatically: $_"
+        return $null
+    } finally {
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+    }
+}
+
 function Test-IsInstalled {
     return (Test-Path (Join-Path $InstallDir "pyproject.toml"))
 }
@@ -141,7 +188,7 @@ function Sync-Runtime($UvPath) {
     }
 }
 
-function Run-Setup($UvPath) {
+function Run-Setup($UvPath, $GhPath) {
     if (Test-Path $ConfigPath) {
         Write-Info "Config already exists at $ConfigPath — skipping interactive setup."
         return
@@ -156,6 +203,9 @@ function Run-Setup($UvPath) {
     Write-Info "Running interactive setup..."
     Push-Location $InstallDir
     try {
+        if ($GhPath) {
+            $env:TILLER_GH_PATH = $GhPath
+        }
         & $UvPath run tiller setup --config $ConfigPath | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Invoke-Die "Setup failed."
@@ -182,6 +232,11 @@ function Install-ScheduledTask($RunnerPath) {
     $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -File `"$RunnerPath`""
     $Trigger = New-ScheduledTaskTrigger -AtLogOn
     $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+
+    try {
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    } catch {
+    }
 
     try {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -263,7 +318,8 @@ Handle-Mode
 $UvPath = Get-UvPath
 Download-Source
 Sync-Runtime -UvPath $UvPath
-Run-Setup -UvPath $UvPath
+$GhPath = Get-GhPath
+Run-Setup -UvPath $UvPath -GhPath $GhPath
 $RunnerPath = Write-Runner -UvPath $UvPath
 Install-ScheduledTask -RunnerPath $RunnerPath
 Write-Success "Tiller installation completed"

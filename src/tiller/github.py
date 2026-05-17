@@ -16,6 +16,18 @@ class GitHubRepoRef:
 
 
 @dataclass(slots=True)
+class GitHubAccessibleRepo:
+    name: str
+    owner: str
+    full_name: str
+    url: str
+    default_branch: str
+    description: str | None
+    private: bool
+    pushed_at: str | None = None
+
+
+@dataclass(slots=True)
 class PullRequestRef:
     number: int
     url: str
@@ -32,7 +44,7 @@ class GitHubClient:
         self.token = config.resolve_token()
         if not self.token:
             raise RuntimeError(
-                "GitHub token is not configured. Set github.token in tiller.yaml or export GITHUB_API_TOKEN."
+                "GitHub token is not configured. Use github.token, export GITHUB_API_TOKEN, or authenticate with GitHub CLI browser login."
             )
         self._client = httpx.Client(
             base_url=self._normalize_base_url(config.url),
@@ -62,7 +74,7 @@ class GitHubClient:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
                 raise RuntimeError(
-                    "GitHub validation failed: token is invalid or expired. Update github.token in tiller.yaml or export a valid GITHUB_API_TOKEN."
+                    "GitHub validation failed: authentication is invalid or expired. Update github.token, export a valid GITHUB_API_TOKEN, or refresh GitHub CLI login."
                 ) from exc
             raise
         payload = response.json()
@@ -87,6 +99,36 @@ class GitHubClient:
             "private": payload.get("private"),
             "html_url": payload.get("html_url"),
         }
+
+    def list_accessible_repos(self) -> list[GitHubAccessibleRepo]:
+        repos: list[GitHubAccessibleRepo] = []
+        page = 1
+        while True:
+            response = self._client.get(
+                "/user/repos",
+                params={"per_page": 100, "page": page, "sort": "pushed", "direction": "desc"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not payload:
+                break
+            repos.extend(
+                GitHubAccessibleRepo(
+                    name=item["name"],
+                    owner=item["owner"]["login"],
+                    full_name=item["full_name"],
+                    url=item["clone_url"],
+                    default_branch=item.get("default_branch") or "main",
+                    description=item.get("description"),
+                    private=bool(item.get("private", False)),
+                    pushed_at=item.get("pushed_at") or item.get("updated_at"),
+                )
+                for item in payload
+            )
+            if len(payload) < 100:
+                break
+            page += 1
+        return repos
 
     def create_pull_request(
         self,

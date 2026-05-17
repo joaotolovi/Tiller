@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import yaml
 
 from .agents import load_harness
+from .github import GitHubClient
 from .setup_prompts import (
     choose_option,
     collect_agent_config,
@@ -18,18 +18,53 @@ from .setup_prompts import (
 from .setup_registry import get_setup_providers
 
 
-def _github_token_from_payload(payload: dict[str, object]) -> str | None:
-    token = payload.get("token")
-    if isinstance(token, str) and token:
-        return token
-    token_env = payload.get("token_env", "GITHUB_API_TOKEN")
-    if isinstance(token_env, str) and token_env:
-        return os.environ.get(token_env)
-    return None
+def _github_token_for_setup(payload: dict[str, object]) -> str | None:
+    from .models import GitHubConfig
+
+    config = GitHubConfig(
+        enabled=bool(payload.get("enabled", False)),
+        url=str(payload.get("url", "https://api.github.com")),
+        token=payload.get("token") if isinstance(payload.get("token"), str) else None,
+        token_env=str(payload.get("token_env", "GITHUB_API_TOKEN")),
+        auth_method=str(payload.get("auth_method", "token")),
+        gh_path=payload.get("gh_path") if isinstance(payload.get("gh_path"), str) else None,
+    )
+    return config.resolve_token()
 
 
 def render_setup_config(payload: dict[str, object]) -> str:
     return yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+
+
+def _list_accessible_github_repos(github_payload: dict[str, object]) -> list[dict[str, object]]:
+    from .models import GitHubConfig
+
+    client = GitHubClient(
+        GitHubConfig(
+            enabled=bool(github_payload.get("enabled", False)),
+            url=str(github_payload.get("url", "https://api.github.com")),
+            token=github_payload.get("token") if isinstance(github_payload.get("token"), str) else None,
+            token_env=str(github_payload.get("token_env", "GITHUB_API_TOKEN")),
+            auth_method=str(github_payload.get("auth_method", "token")),
+            gh_path=github_payload.get("gh_path") if isinstance(github_payload.get("gh_path"), str) else None,
+        )
+    )
+    try:
+        repos = client.list_accessible_repos()
+        repos = sorted(repos, key=lambda repo: repo.pushed_at or "", reverse=True)
+        return [
+            {
+                "name": repo.name,
+                "full_name": repo.full_name,
+                "url": repo.url,
+                "default_branch": repo.default_branch,
+                "description": repo.description,
+                "pushed_at": repo.pushed_at,
+            }
+            for repo in repos
+        ]
+    finally:
+        client.close()
 
 
 async def run_setup(config_path: str) -> int:
@@ -64,9 +99,11 @@ async def run_setup(config_path: str) -> int:
         },
         "github": github_payload,
         "projects": await collect_projects(
-            _github_token_from_payload(github_payload),
+            _github_token_for_setup(github_payload),
+            github_payload,
             validate_clone=validate_project_clone_url,
             resolve_default_branch=detect_project_default_branch,
+            list_accessible_repos=_list_accessible_github_repos,
         ),
         "session": default_session_config(),
     }
